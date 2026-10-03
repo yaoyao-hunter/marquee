@@ -1,0 +1,7 @@
+[package]
+name = "marquee"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal marquee / scrolling text with correct CJK, emoji and mixed-width Unicode handling"
+
+[dependencies]
