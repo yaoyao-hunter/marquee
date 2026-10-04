@@ -64,13 +64,21 @@ marquee --once " deploying… "          # one cycle, then exit
 marquee --repeat 3 " hello "           # exactly three cycles
 ```
 
+By default the next round waits for the text to leave the screen entirely.
+`--continuous` makes the next copy follow the previous one, `--gap` columns
+behind it, so the stream never empties — the classic LED-marquee look:
+
+```sh
+marquee --continuous " ON AIR "        # the tail leads, the head follows
+```
+
 Exit codes:
 
 | code | meaning |
 | --- | --- |
 | 0 | the cycles ran out, or you stopped it with Ctrl+C |
 | 1 | drawing failed (a real I/O error) |
-| 2 | usage: no text, blank text, or a bad flag |
+| 2 | usage: no text, blank text, a bad flag, or an unusable theme |
 
 Redirected output behaves like a Unix citizen: with stdout not a terminal, each
 frame becomes one plain line with no escape bytes, paced as usual, and when the
@@ -98,12 +106,14 @@ terminal is refused before the first frame — exit 2, the needed size on
 stderr. A window that shrinks below the limit mid-run does not stop the
 scroll: the scale re-clamps down, and back up when the window grows again,
 with a stderr notice naming the size that restores it. Every main-mode
-option works in big mode; `--align` has no effect there either.
+option works in big mode — `--continuous` tiles the big glyphs into a stream,
+`--theme` colours the half-blocks — and `--align` has no effect there either.
 
 The full reference — every flag, the input rule, exit codes, environment — is
 the manual page: [docs/marquee.1](docs/marquee.1), read it with
 `man docs/marquee.1`. Big-font mode has its own complete manual in markdown:
-[docs/manual.md](docs/manual.md).
+[docs/manual.md](docs/manual.md), with a Chinese version at
+[docs/manual.zh-CN.md](docs/manual.zh-CN.md).
 
 ## Unicode & CJK
 
@@ -120,6 +130,54 @@ padded back out to the exact width, so nothing shifts and nothing wraps.
 
 When the terminal is resized mid-scroll, the next frame is already the new
 width, with the text kept at the same point of its trip.
+
+## Themes
+
+`--theme` colours the text — on the single line and in big mode alike, where
+the foreground colours the half-blocks and the background the blank cells:
+
+```sh
+marquee "你好世界" --theme matrix
+marquee --big --scale 2 "部署中" --theme alarm
+marquee " ON AIR " --continuous --theme rainbow
+```
+
+Eleven themes ship built in: `default` (no colour, the default), `bold`,
+`alarm` (bold bright red), `gold` (bold bright yellow), `matrix` (bold bright
+green), `ice` (bright cyan), `violet` (bold bright magenta) — and four
+palettes: `rainbow` (six vivid ANSI colours cycling per column), `sunset`,
+`ocean` and `neon` (RGB palettes). A palette is banded: the colours cycle
+across the screen's columns and the text flows through them, so a big-font
+glyph wider than a band shows several colours at once — the rainbow
+pixel-art look.
+
+Your own themes live in a theme file — a small TOML subset — and need no code
+change; the configuration and the drawing are separate layers:
+
+```toml
+# ~/.config/marquee/themes.toml
+[alert]
+fg = "bright-red"        # a named colour (16 ANSI) or #rrggbb
+bold = true
+
+[ocean]
+fg = "#7fd4ff"
+bg = "blue"
+dim = true               # also: italic, underline
+
+[sunset]
+fg = ["#ff5e62", "#ff9966", "#ffd194"]   # a list is a palette
+band = 4                 # columns per colour, default 1
+```
+
+A palette needs at least one colour; one entry is a solid colour, two or
+more cycle across the columns. `bg` takes lists too, painting the padding
+spaces as bands. A theme name that collides with a built-in replaces it.
+Point `--theme-file` at another path to keep themes per project; the default
+location is `$XDG_CONFIG_HOME/marquee/themes.toml`, else
+`~/.config/marquee/themes.toml`. `--no-color` (or a non-empty `NO_COLOR` in
+the environment) scrolls plain regardless of the theme; redirected output
+never carries colour bytes.
 
 ## Piping text
 
@@ -158,21 +216,29 @@ exit 0. The line it used is given back to the pane, scrollback untouched.
 | `--fps <FPS>` | — | frames per second (1–1000); conflicts with `--speed` |
 | `--direction <left\|right>` | `left` | which edge the text enters from |
 | `--bounce` | off | reverse at both edges instead of wrapping |
-| `--gap <COLUMNS>` | 8 | blank columns between cycles |
+| `--continuous` | off | the next copy follows the previous one onto the screen; conflicts with `--bounce` |
+| `--gap <COLUMNS>` | 8 | blank columns between cycles (or between copies, with `--continuous`) |
 | `--once` | — | scroll exactly one cycle, then exit |
 | `--repeat <N>` | — | scroll exactly N cycles; conflicts with `--once` |
 | `--align <left\|center\|right>` | `left` | accepted, currently no effect — see below |
-| `--no-color` | — | accepted, currently no effect — see below |
+| `--no-color` | — | scroll plain, whatever `--theme` says; honours `NO_COLOR` too |
+| `--theme <NAME>` | `default` | colour theme: built-in, or from the theme file |
+| `--theme-file <PATH>` | ~/.config/marquee/themes.toml | where user themes come from |
 | `--big` | off | scroll as big pixel glyphs over `6·scale` rows |
 | `--scale <N>` | 1 | big-mode pixel magnification (1–32); the terminal must fit 12·N columns × (6·N+1) rows |
 | `--font <name>` | `zh-hans` | which packaged pixel font `--big` uses |
 
 `--speed`/`--fps` and `--once`/`--repeat` each conflict with each other, and
 marquee says so rather than guessing. `--scale` and `--font` need `--big`.
-`--align` and `--no-color` are parsed and validated but do nothing yet:
-placement of text shorter than the terminal and colour output are both still
-to come, and the flags are reserved for them.
+`--align` is parsed and validated but does nothing yet: placement of text
+shorter than the terminal is still to come, and the flag is reserved for it.
 Everything else above does exactly what it says.
+
+In continuous mode a cycle is one *period* of the stream — the text plus its
+`gap` — so `--repeat N` counts N passes of the content past any fixed column,
+and the screen does not end blank when the cycles run out (the line is still
+cleaned up on exit). `--bounce` and `--continuous` contradict each other and
+are refused together.
 
 ## Development
 
@@ -189,9 +255,10 @@ Where the behaviour lives:
 | --- | --- |
 | `src/unicode.rs` | grapheme clusters with display widths, precomputed once |
 | `src/cli.rs` | the command line and the TEXT-vs-stdin precedence rule |
+| `src/theme.rs` | the theme layer: built-ins, user theme files, colour names, palettes |
 | `src/terminal.rs` | raw mode, resizes, Ctrl+C, restoring the terminal |
-| `src/marquee.rs` | the scroll engine: one column of travel per frame |
-| `src/renderer.rs` | frame drawing (one line or `6·scale` big rows), pacing, and the clean exit |
+| `src/marquee.rs` | the scroll engine: one column of travel per frame, continuous tiling |
+| `src/renderer.rs` | frame drawing (one line or `6·scale` big rows), pacing, themes as SGR, and the clean exit |
 | `src/main.rs` | the run loop that ties them together |
 | `src/bigfont/` | the committed glyph atlas: parser, cluster mapping, rasterizer |
 | `tools/gen-bigfont` | regenerates the atlas from the Fusion Pixel Font BDF release |

@@ -7,13 +7,13 @@
 .Sh SYNOPSIS
 .Bk -words
 .Nm marquee
-.Op Fl bounce
+.Op Fl bounce | Fl continuous
 .Op Fl direction Ar left | right
 .Op Fl gap Ar COLUMNS
 .Op Fl speed Ar MS | Fl fps Ar FPS
 .Op Fl once | Fl repeat Ar N
 .Op Fl align Ar left | center | right
-.Op Fl no-color
+.Op Fl no-color | Fl theme Ar NAME | Fl theme-file Ar PATH
 .Op Fl big
 .Op Fl scale Ar N
 .Op Fl font Ar name
@@ -30,6 +30,13 @@ edge, travels one display column per frame, leaves at the other edge, and
 starts again after
 .Fl gap
 blank columns.
+By default the next cycle waits for the text to leave the screen entirely;
+with
+.Fl continuous
+the next copy of the text follows the previous one, the
+.Fl gap
+columns behind it, so the screen never empties once the first copy has
+entered \(em the classic LED-marquee stream.
 It loops forever until it has run the cycles it was asked for or it is stopped
 with Ctrl+C.
 .Pp
@@ -141,8 +148,25 @@ mirrors it.
 Reverse at both edges instead of wrapping around to re-enter.
 A bounce cycle is the trip to one edge, the gap, the trip back, and the gap
 again.
+Cannot be combined with
+.Fl continuous :
+a bounce reverses at the edges, a continuous stream follows itself around
+them.
+.It Fl continuous
+Start the next copy of the text before the previous one has left the screen,
+.Fl gap
+columns behind it.
+One cycle is then one period of the stream \(em the text plus its gap \(em so
+.Fl once
+and
+.Fl repeat
+count passes of the content past any fixed column, and the screen does not
+end blank when the cycles run out.
+A gap wider than the viewport still shows blank frames between the copies.
 .It Fl gap Ar COLUMNS
-Blank columns between the end of one cycle and the start of the next.
+Blank columns between the end of one cycle and the start of the next, or
+between consecutive copies with
+.Fl continuous .
 Default 8.
 .It Fl once
 Scroll exactly one cycle, then exit with status 0.
@@ -170,11 +194,88 @@ Currently accepted and validated but
 text scrolls from the edge as usual, regardless of this flag.
 It is reserved for a static placement mode.
 .It Fl no-color
-Never emit colour escape sequences.
+Never emit colour escape sequences, whatever
+.Fl theme
+says; a non-empty
+.Ev NO_COLOR
+in the environment does the same.
 .Pp
-Currently accepted but without effect, because
-.Nm
-does not emit colour yet at all.
+The theme name is still validated: a typo is reported even when colour is off.
+.It Fl theme Ar name
+Which theme the text is painted with, on the single line and in big mode
+alike: the theme's foreground colours the text (the half-blocks in big mode),
+its background the blanks.
+.Cm default
+(the default) is plain; the other built-ins are
+.Cm bold ,
+.Cm alarm ,
+.Cm gold ,
+.Cm matrix ,
+.Cm ice ,
+.Cm violet ,
+and the palettes
+.Cm rainbow
+(six vivid ANSI colours, one per column),
+.Cm sunset ,
+.Cm ocean
+and
+.Cm neon .
+.Pp
+A palette is banded: its colours cycle across the screen's display columns
+and the text flows through them; a glyph wider than
+.Ql band
+columns shows several colours at once.
+.Pp
+A theme file adds or overrides themes by name; see
+.Fl theme-file .
+An unknown name is a usage error that lists what is available.
+.It Fl theme-file Ar path
+Read user themes from this file instead of the default location.
+The file is a small TOML subset: one
+.Ql [name]
+section per theme, with
+.Ql fg
+and
+.Ql bg
+as a colour \(em one of the 16 ANSI colour names such as
+.Ql red
+or
+.Ql bright-red ,
+or
+.Ql #rrggbb ,
+or a list of colours, a palette
+\(em and
+.Ql bold ,
+.Ql dim ,
+.Ql italic
+and
+.Ql underline
+as booleans, plus
+.Ql band
+as the number of columns each palette colour spans (default 1).
+.Bd -literal -offset indent
+[alert]
+fg = "bright-red"
+bold = true
+
+[ocean]
+fg = "#7fd4ff"
+bg = "blue"
+dim = true
+
+[sunset]
+fg = ["#ff5e62", "#ff9966", "#ffd194"]
+band = 4
+.Ed
+.Pp
+Without
+.Fl theme-file ,
+themes come from
+.Pa $XDG_CONFIG_HOME/marquee/themes.toml
+or
+.Pa ~/.config/marquee/themes.toml
+when that file exists; a file given explicitly must exist and parse, and a
+malformed line is reported with its line number.
 .It Fl big
 Scroll the text as big pixel glyphs spanning several terminal rows, rendered
 from the embedded Fusion Pixel Font with half-block characters.
@@ -242,7 +343,9 @@ redirected output went away.
 Drawing failed: a real I/O error.
 .It 2
 Usage: no text, blank text, a bad flag (the command-line parser's own error
-code), or a terminal smaller than big-font mode needs.
+code), a theme that cannot be resolved \(em an unknown name, or a theme
+file that is missing or malformed \(em or a terminal smaller than
+big-font mode needs.
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width 10n
@@ -253,6 +356,16 @@ Otherwise 80.
 .It Ev LINES
 The height assumed in the same situation.
 Otherwise 24.
+.It Ev NO_COLOR
+When set to a non-empty value, marquee scrolls plain regardless of
+.Fl theme ,
+the https://no-color.org convention.
+.It Ev XDG_CONFIG_HOME , Ev HOME
+Where the default theme file lives:
+.Pa $XDG_CONFIG_HOME/marquee/themes.toml ,
+or
+.Pa $HOME/.config/marquee/themes.toml
+when XDG is unset.
 .El
 .Sh EXAMPLES
 Scroll a mixed CJK and emoji string at the default speed:
@@ -297,8 +410,9 @@ $ marquee --once \(dq hi \(dq > frames.txt
 is accepted and validated but has no effect yet (see
 .Sx OPTIONS ) .
 .It
-.Fl no-color
-is accepted but has no effect, because no colour is emitted yet.
+.Fl theme-file
+covers the whole theme grammar; per-mode themes (one look for the single
+line, another for big mode) are not supported yet.
 .El
 .Sh SEE ALSO
 .Xr head 1 ,
