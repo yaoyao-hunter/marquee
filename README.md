@@ -77,6 +77,26 @@ frame becomes one plain line with no escape bytes, paced as usual, and when the
 reader goes away (`marquee … | head -3`) marquee exits 0 in silence instead of
 printing "Broken pipe".
 
+## Big-font mode
+
+`--big` scrolls the text as large pixel glyphs spanning several terminal rows,
+rendered from the embedded Fusion Pixel Font (12px, zh-Hans + ASCII, tofu for
+anything missing) with half-block characters:
+
+```sh
+marquee "你好世界" --big --scale 2
+```
+
+The glyphs occupy `6·scale` rows: the line the cursor is on, plus the rows
+above it. Everything else behaves like the single line — no alternate screen,
+one buffered write per frame, and on exit (or Ctrl+C, or a panic) those rows
+are erased and the shell's line comes back blank.
+
+`--scale` is clamped to the terminal height (`6·scale ≤ rows − 1`, one row of
+margin); when that happens a notice goes to stderr explaining the scale that
+actually runs. The same fitting happens live on every resize. Every main-mode
+option works in big mode; `--align` has no effect there either.
+
 The full reference — every flag, the input rule, exit codes, environment — is
 the manual page: [docs/marquee.1](docs/marquee.1), read it with
 `man docs/marquee.1`.
@@ -139,11 +159,15 @@ exit 0. The line it used is given back to the pane, scrollback untouched.
 | `--repeat <N>` | — | scroll exactly N cycles; conflicts with `--once` |
 | `--align <left\|center\|right>` | `left` | accepted, currently no effect — see below |
 | `--no-color` | — | accepted, currently no effect — see below |
+| `--big` | off | scroll as big pixel glyphs over `6·scale` rows |
+| `--scale <N>` | 1 | big-mode pixel magnification (1–32), clamped to the terminal height |
+| `--font <name>` | `zh-hans` | which packaged pixel font `--big` uses |
 
 `--speed`/`--fps` and `--once`/`--repeat` each conflict with each other, and
-marquee says so rather than guessing. `--align` and `--no-color` are parsed and
-validated but do nothing yet: placement of text shorter than the terminal and
-colour output are both still to come, and the flags are reserved for them.
+marquee says so rather than guessing. `--scale` and `--font` need `--big`.
+`--align` and `--no-color` are parsed and validated but do nothing yet:
+placement of text shorter than the terminal and colour output are both still
+to come, and the flags are reserved for them.
 Everything else above does exactly what it says.
 
 ## Development
@@ -163,7 +187,26 @@ Where the behaviour lives:
 | `src/cli.rs` | the command line and the TEXT-vs-stdin precedence rule |
 | `src/terminal.rs` | raw mode, resizes, Ctrl+C, restoring the terminal |
 | `src/marquee.rs` | the scroll engine: one column of travel per frame |
-| `src/renderer.rs` | frame drawing, pacing, and the clean exit |
+| `src/renderer.rs` | frame drawing (one line or `6·scale` big rows), pacing, and the clean exit |
 | `src/main.rs` | the run loop that ties them together |
+| `src/bigfont/` | the committed glyph atlas: parser, cluster mapping, rasterizer |
+| `tools/gen-bigfont` | regenerates the atlas from the Fusion Pixel Font BDF release |
+
+### Big-font assets
+
+`assets/bigfont-12px-zh-hans.bin` is a compact glyph atlas generated at
+development time from the official Fusion Pixel Font BDF release by
+`tools/gen-bigfont` and committed to the repo, so builds stay offline and
+`cargo install` needs no font downloads. The binary format, the recorded
+provenance (release tag + sha256) and the regeneration procedure are in
+[docs/bigfont-asset-format.md](docs/bigfont-asset-format.md).
+
+## Acknowledgements
+
+- [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) by TakWolf,
+  licensed under the [SIL Open Font License 1.1](assets/fusion-pixel/LICENSE-OFL).
+  It merges glyphs from Ark Pixel Font, Cubic 11 and Galmuri; the full
+  copyright notices live in
+  [assets/fusion-pixel/COPYRIGHT.md](assets/fusion-pixel/COPYRIGHT.md).
 
 MIT licensed — see [LICENSE](LICENSE).
