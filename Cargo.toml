@@ -1,11 +1,26 @@
 [package]
-name = "marquee"
+# crates.io name: `marquee` was taken in 2023 by an unrelated crate, so the
+# package is `terminal-marquee` while the installed binary stays `marquee`.
+name = "terminal-marquee"
 version = "0.1.0"
 edition = "2024"
 description = "Terminal marquee / scrolling text with correct CJK, emoji and mixed-width Unicode handling"
+license = "MIT"
+repository = "https://github.com/yaoyao-hunter/marquee"
+readme = "README.md"
+keywords = ["terminal", "marquee", "cli", "unicode", "cjk"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "marquee"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-crossterm = "0.29.0"
+# use-dev-tty: read events from /dev/tty when stdin is not a terminal, which is
+# what `echo 正在部署... | marquee` needs. crossterm's default mio-based event
+# source fails to initialise from that fd ("Failed to initialize input reader"),
+# and without events a raw-mode marquee could not even be Ctrl+C'd.
+crossterm = { version = "0.29.0", features = ["use-dev-tty"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"
