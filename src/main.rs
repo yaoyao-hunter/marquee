@@ -41,16 +41,19 @@ fn main() -> ExitCode {
         cycles: cli.cycles(),
     };
 
-    // Stub: one static frame, after which dropping the terminal restores
-    // cursor and mode. Frame 0 of a scroll is blank by design — the text sits
-    // just off the edge it enters from — so this prints an empty line until
-    // T-7 replaces it with the paced loop that honours the rest of `cli`
-    // (frame interval, colour) and reacts to the resize and quit events the
-    // terminal reports.
+    // Stub: one frame, then a clean line. Frame 0 of a scroll is blank by
+    // design (the text sits just off the edge it enters from), so this shows
+    // nothing until T-7 replaces it with the paced loop: poll the terminal for
+    // `renderer.delay_until_next_frame()`, handle resize and quit, draw,
+    // advance, and stop when `engine.is_finished()`.
     let mut terminal = terminal::open();
     let engine = marquee::Engine::new(unicode::prepare(&text), terminal.width(), motion);
-    if let Err(err) = renderer::render_frame(&mut terminal, &engine).and_then(|()| terminal.flush())
-    {
+    let mut renderer = renderer::Renderer::new(cli.frame_interval());
+
+    let drawn = renderer
+        .draw(&mut *terminal, &engine)
+        .and_then(|()| renderer.finish(&mut *terminal));
+    if let Err(err) = drawn {
         eprintln!("marquee: {err}");
         return ExitCode::from(EXIT_IO);
     }
