@@ -36,9 +36,6 @@ pub struct Cell {
 
 impl Cell {
     /// The cluster's own text — one or more codepoints, always kept whole.
-    // Consumed by the scroll engine and renderer (T-5/T-6); until they exist
-    // the binary itself has no caller, so keep the dead-code gate quiet.
-    #[allow(dead_code)]
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -61,6 +58,7 @@ pub struct PreparedText {
 
 impl PreparedText {
     /// The original text, unchanged.
+    #[allow(dead_code)] // kept for diagnostics; nothing reads it yet
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -68,14 +66,13 @@ impl PreparedText {
     /// The grapheme clusters in scroll order, each carrying its width.
     ///
     /// This borrows the precomputed cells; calling it does no Unicode work.
-    #[allow(dead_code)] // consumed by the scroll engine (T-5)
     pub fn cells(&self) -> &[Cell] {
         &self.cells
     }
 
     /// Total width of the text in terminal columns: the sum of the cell
-    /// widths, so a scroll cycle is exactly `width + gap` columns long.
-    #[allow(dead_code)] // consumed by the scroll engine (T-5)
+    /// widths. Together with the viewport width this is what a scroll cycle
+    /// is measured in (see `crate::marquee`).
     pub fn width(&self) -> usize {
         self.width
     }
