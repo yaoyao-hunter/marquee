@@ -6,6 +6,10 @@ description = "Terminal marquee / scrolling text with correct CJK, emoji and mix
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-crossterm = "0.29.0"
+# use-dev-tty: read events from /dev/tty when stdin is not a terminal, which is
+# what `echo 正在部署... | marquee` needs. crossterm's default mio-based event
+# source fails to initialise from that fd ("Failed to initialize input reader"),
+# and without events a raw-mode marquee could not even be Ctrl+C'd.
+crossterm = { version = "0.29.0", features = ["use-dev-tty"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"

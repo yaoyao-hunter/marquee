@@ -12,6 +12,10 @@
 //! clears and refills the frame buffer, and the escape sequences are queued
 //! into a byte buffer that already has the capacity.
 //!
+//! Redirected output is the exception: with no terminal there is no cursor to
+//! reposition, and escape bytes in a file are just noise, so a frame goes out
+//! as one plain line and [`Renderer::finish`] has nothing to erase.
+//!
 //! Pacing lives here too: [`Renderer::delay_until_next_frame`] is how long the
 //! run loop should wait before the next frame is due — which is also the right
 //! timeout for [`crate::terminal::Terminal::poll`], so a resize or Ctrl+C is
@@ -73,12 +77,17 @@ impl Renderer {
         }
 
         self.line.clear();
-        queue!(
-            self.line,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            Print(&self.frame)
-        )?;
+        if out.supports_escape() {
+            queue!(
+                self.line,
+                MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
+                Print(&self.frame)
+            )?;
+        } else {
+            self.line.extend_from_slice(self.frame.as_bytes());
+            self.line.push(b'\n');
+        }
 
         out.write_all(&self.line)?;
         out.flush()?;
@@ -89,7 +98,13 @@ impl Renderer {
     /// Erases the marquee's line and leaves the cursor at column 0, so the
     /// shell prompt lands on a clean line. Called on every way out of the run
     /// loop, including Ctrl+C.
+    ///
+    /// Redirected output needs no cleanup: every frame it got already ended
+    /// with a newline.
     pub fn finish(&mut self, out: &mut dyn Terminal) -> io::Result<()> {
+        if !out.supports_escape() {
+            return Ok(());
+        }
         self.line.clear();
         queue!(self.line, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
         out.write_all(&self.line)?;
@@ -100,7 +115,6 @@ impl Renderer {
     ///
     /// Doubles as the poll timeout for the run loop, so input is handled while
     /// the frame interval runs down.
-    #[allow(dead_code)] // consumed by the run loop (T-7)
     pub fn delay_until_next_frame(&self) -> Duration {
         self.next_due.saturating_duration_since(Instant::now())
     }
@@ -154,7 +168,7 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use crate::marquee::{Direction, Motion};
-    use crate::terminal::FakeTerminal;
+    use crate::terminal::{FakeTerminal, PlainTerminal};
     use crate::unicode::prepare;
     use clap::Parser;
 
@@ -300,6 +314,43 @@ mod tests {
             .expect("a fake never fails");
         assert_eq!(visible(&terminal.frames()[2]).width(), 6);
         assert_eq!(terminal.flush_count(), 3, "still one flush per frame");
+    }
+
+    #[test]
+    fn redirected_output_gets_one_plain_line_per_frame() {
+        let mut terminal = PlainTerminal::new(Vec::new(), (8, 3));
+        assert!(!terminal.supports_escape(), "a redirect is not a terminal");
+
+        // What the same three frames should look like, straight from the
+        // engine.
+        let mut reference = engine("你好世界 🚀", 8);
+        at_offset(&mut reference, 5);
+        let mut expected = Vec::new();
+        for _ in 0..3 {
+            let mut frame = String::new();
+            reference.draw(&mut frame);
+            expected.push(frame);
+            reference.advance();
+        }
+
+        let mut engine = engine("你好世界 🚀", 8);
+        at_offset(&mut engine, 5);
+        let mut renderer = Renderer::new(Duration::ZERO);
+        for _ in 0..3 {
+            renderer
+                .draw(&mut terminal, &engine)
+                .expect("a Vec never fails");
+            engine.advance();
+        }
+        renderer.finish(&mut terminal).expect("a Vec never fails");
+
+        let bytes = terminal.into_inner();
+        let text = String::from_utf8(bytes).expect("plain frames are text");
+        assert!(
+            !text.contains('\u{1b}'),
+            "an escape byte reached redirected output: {text:?}"
+        );
+        assert_eq!(text.lines().collect::<Vec<_>>(), expected, "{text:?}");
     }
 
     #[test]
