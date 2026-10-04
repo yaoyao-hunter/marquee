@@ -1,0 +1,11 @@
+[package]
+name = "gen-bigfont"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Dev-time tool: convert the fusion-pixel-font 12px monospaced BDF into marquee's embedded bigfont asset"
+
+[dependencies]
+encoding_rs = "0.8.42"
+sha2 = "0.11.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
