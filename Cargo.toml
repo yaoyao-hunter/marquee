@@ -5,3 +5,5 @@ edition = "2024"
 description = "Terminal marquee / scrolling text with correct CJK, emoji and mixed-width Unicode handling"
 
 [dependencies]
+unicode-segmentation = "1"
+unicode-width = "0.2"

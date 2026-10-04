@@ -19,7 +19,7 @@ impl Engine {
 
     /// The text of the current frame. Stub: always the full text.
     pub fn frame_text(&self) -> &str {
-        &self.prepared.text
+        self.prepared.text()
     }
 
     /// The terminal width in columns the engine renders into.
