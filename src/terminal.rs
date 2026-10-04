@@ -22,13 +22,13 @@
 //! terminal is never left damaged.
 
 use std::io::{self, BufWriter, IsTerminal, Stdout, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crossterm::cursor::{Hide, Show};
+use crossterm::cursor::{Hide, MoveDown, MoveToColumn, MoveUp, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::queue;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 
 /// Columns assumed when the width cannot be detected (redirected stdout, CI).
 pub const FALLBACK_COLUMNS: usize = 80;
@@ -151,11 +151,26 @@ static RAW_MODE: AtomicBool = AtomicBool::new(false);
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 static PANIC_HOOK: AtomicBool = AtomicBool::new(false);
 
+/// How many terminal lines the current run has taken over: 1 for the
+/// single-line marquee, `6·scale` for big mode. The panic hook erases this
+/// many rows so a panic mid-run leaves a clean screen — [`Renderer::finish`]
+/// (T-6) and [`BigRenderer::finish`](crate::renderer::BigRenderer::finish)
+/// do the same on the normal way out, and reset it to 1.
+static LINES_TAKEN: AtomicUsize = AtomicUsize::new(1);
+
+/// Records how many terminal lines the current run occupies, so a panic can
+/// erase exactly them. Called by the big renderer on every draw (its row
+/// count changes with `--scale` and resizes) and reset by its `finish`.
+pub fn set_lines_taken(rows: usize) {
+    LINES_TAKEN.store(rows.max(1), Ordering::Release);
+}
+
 /// Gives the terminal back: cursor visible, raw mode off. Idempotent, and
 /// callable from a panic hook that has no handle on the terminal.
 fn restore() {
     if CURSOR_HIDDEN.swap(false, Ordering::AcqRel) {
-        let _ = exit_sequence(&mut io::stdout());
+        let lines = LINES_TAKEN.swap(1, Ordering::AcqRel).max(1);
+        let _ = exit_sequence(&mut io::stdout(), lines);
     }
     if RAW_MODE.swap(false, Ordering::AcqRel) {
         let _ = disable_raw_mode();
@@ -170,10 +185,35 @@ fn enter_sequence(out: &mut impl Write) -> io::Result<()> {
     out.flush()
 }
 
-/// The escape sequences that give the line back.
-fn exit_sequence(out: &mut impl Write) -> io::Result<()> {
+/// The escape sequences that give the lines back: erase the `lines` rows the
+/// run occupied, ending at the line the cursor is on (where a frame parks
+/// it), then show the cursor.
+fn exit_sequence(out: &mut impl Write, lines: usize) -> io::Result<()> {
+    // A zero-row move is not emitted: some terminals treat ESC[0A as "one
+    // row up", which would eat the line above a single-line marquee.
+    queue!(out, MoveToColumn(0))?;
+    if lines > 1 {
+        queue!(out, MoveUp(rows_above(lines)))?;
+    }
+    for line in 0..lines {
+        queue!(out, Clear(ClearType::CurrentLine))?;
+        if line + 1 < lines {
+            queue!(out, MoveUp(1))?;
+        }
+    }
+    // The erases walked up to the top of the region; come back down to the
+    // row the run started on. The column stayed 0 throughout.
+    if lines > 1 {
+        queue!(out, MoveDown(rows_above(lines)))?;
+    }
     queue!(out, Show)?;
     out.flush()
+}
+
+/// The move-up distance to the top of a `lines`-row region: one less than
+/// the line count, as a `u16` for crossterm's relative cursor moves.
+fn rows_above(lines: usize) -> u16 {
+    u16::try_from(lines - 1).unwrap_or(u16::MAX)
 }
 
 /// Restores the terminal before a panic message is printed, whatever the
@@ -444,6 +484,40 @@ mod tests {
     use crossterm::event::{Event as CtEvent, MouseButton, MouseEvent, MouseEventKind};
 
     #[test]
+    fn the_exit_sequence_erases_the_taken_lines_and_shows_the_cursor() {
+        // A single-line run: park, clear, show — nothing else.
+        let mut single = Vec::new();
+        exit_sequence(&mut single, 1).expect("a Vec never fails");
+        assert_eq!(
+            String::from_utf8(single).unwrap(),
+            "\x1b[1G\x1b[2K\x1b[?25h"
+        );
+
+        // A big run of six rows: walk to the top of the region, clearing
+        // each line on the way, back down, then show.
+        let mut big = Vec::new();
+        exit_sequence(&mut big, 6).expect("a Vec never fails");
+        let mut expected = String::from("\x1b[1G\x1b[5A");
+        for line in 0..6 {
+            expected.push_str("\x1b[2K");
+            if line + 1 < 6 {
+                expected.push_str("\x1b[1A");
+            }
+        }
+        expected.push_str("\x1b[5B\x1b[?25h");
+        assert_eq!(String::from_utf8(big).unwrap(), expected);
+    }
+
+    #[test]
+    fn lines_taken_never_drops_below_one() {
+        set_lines_taken(0);
+        assert_eq!(LINES_TAKEN.load(Ordering::Acquire), 1);
+        set_lines_taken(12);
+        assert_eq!(LINES_TAKEN.load(Ordering::Acquire), 12);
+        set_lines_taken(1);
+    }
+
+    #[test]
     fn fallback_size_prefers_the_environment_and_rejects_rubbish() {
         assert_eq!(fallback_size(None, None), (FALLBACK_COLUMNS, FALLBACK_ROWS));
         assert_eq!(fallback_size(Some("120"), Some("30")), (120, 30));
@@ -511,13 +585,17 @@ mod tests {
     fn taking_the_line_never_enters_the_alternate_screen() {
         let mut enter = Vec::new();
         enter_sequence(&mut enter).expect("writing to a Vec cannot fail");
+        // The single-line run: one row to erase, then the cursor back.
         let mut exit = Vec::new();
-        exit_sequence(&mut exit).expect("writing to a Vec cannot fail");
+        exit_sequence(&mut exit, 1).expect("writing to a Vec cannot fail");
 
         let entered = String::from_utf8_lossy(&enter);
         let exited = String::from_utf8_lossy(&exit);
         assert_eq!(entered, "\x1b[?25l", "hide the cursor and nothing else");
-        assert_eq!(exited, "\x1b[?25h", "show the cursor again");
+        assert_eq!(
+            exited, "\x1b[1G\x1b[2K\x1b[?25h",
+            "park, clear the one row taken, show the cursor"
+        );
         // The alternate screen would swallow the shell's scrollback.
         for sequence in ["\x1b[?1049h", "\x1b[?47h", "\x1b[?1047h"] {
             assert!(!entered.contains(sequence), "entered the alternate screen");

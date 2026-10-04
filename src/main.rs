@@ -1,6 +1,5 @@
-// The big-font face and glyph types are consumed by the scroll engine (T-11);
-// the Rasterizer still waits for the T-12 renderer, so parts of the module
-// tree remain dead until then (see vault note N-3).
+// The engine (T-11) and renderer (T-12) consume the face, glyphs, cells and
+// rasterizer; from_bytes/render_text stay test- and diagnostics-only (N-3).
 #[allow(dead_code)]
 mod bigfont;
 mod cli;
@@ -15,9 +14,10 @@ use std::time::Duration;
 
 use clap::Parser;
 
+use bigfont::BigFontFace;
 use cli::Cli;
-use marquee::{Direction, Engine, Motion};
-use renderer::Renderer;
+use marquee::{BigStrip, Direction, Engine, Motion, clamp_scale};
+use renderer::{BigRenderer, Renderer};
 use terminal::{Terminal, TerminalEvent};
 use unicode::{PreparedText, prepare};
 
@@ -47,12 +47,26 @@ fn main() -> ExitCode {
     };
 
     let mut terminal = terminal::open();
-    let scrolled = scroll(
-        prepare(&text),
-        motion_for(&cli),
-        cli.frame_interval(),
-        &mut *terminal,
-    );
+    let scrolled = if cli.big() {
+        match big_font(cli.font()) {
+            Ok(face) => scroll_big(
+                prepare(&text),
+                motion_for(&cli),
+                cli.frame_interval(),
+                cli.scale(),
+                &face,
+                &mut *terminal,
+            ),
+            Err(err) => Err(err),
+        }
+    } else {
+        scroll(
+            prepare(&text),
+            motion_for(&cli),
+            cli.frame_interval(),
+            &mut *terminal,
+        )
+    };
     // Dropping the terminal shows the cursor and leaves raw mode, so anything
     // printed about the run lands on a terminal that is ours again.
     drop(terminal);
@@ -63,6 +77,15 @@ fn main() -> ExitCode {
             eprintln!("marquee: {err}");
             ExitCode::from(EXIT_IO)
         }
+    }
+}
+
+/// The packaged atlas the command line asked for.
+fn big_font(font: cli::Font) -> io::Result<BigFontFace<'static>> {
+    match font {
+        cli::Font::ZhHans => BigFontFace::embedded_zh_hans().map_err(|err| {
+            io::Error::other(format!("the embedded big-font asset is damaged: {err}"))
+        }),
     }
 }
 
@@ -80,44 +103,75 @@ fn motion_for(cli: &Cli) -> Motion {
     }
 }
 
+/// What the run loop needs from either renderer: pace the frames, draw one,
+/// clean up on the way out.
+trait FrameSink {
+    /// How long to wait before the next frame is due; zero means draw now.
+    fn delay_until_next_frame(&self) -> Duration;
+    /// Draws the engine's current frame as one buffered write and one flush.
+    fn draw(&mut self, out: &mut dyn Terminal, engine: &Engine) -> io::Result<()>;
+    /// Leaves the taken lines clean and the cursor parked.
+    fn finish(&mut self, out: &mut dyn Terminal) -> io::Result<()>;
+}
+
+impl FrameSink for Renderer {
+    fn delay_until_next_frame(&self) -> Duration {
+        self.delay_until_next_frame()
+    }
+    fn draw(&mut self, out: &mut dyn Terminal, engine: &Engine) -> io::Result<()> {
+        self.draw(out, engine)
+    }
+    fn finish(&mut self, out: &mut dyn Terminal) -> io::Result<()> {
+        self.finish(out)
+    }
+}
+
+impl FrameSink for BigRenderer {
+    fn delay_until_next_frame(&self) -> Duration {
+        self.delay_until_next_frame()
+    }
+    fn draw(&mut self, out: &mut dyn Terminal, engine: &Engine) -> io::Result<()> {
+        self.draw(out, engine)
+    }
+    fn finish(&mut self, out: &mut dyn Terminal) -> io::Result<()> {
+        self.finish(out)
+    }
+}
+
 /// The run loop: wait out the frame interval while listening to the terminal,
 /// draw one frame, step the text one column, repeat.
 ///
 /// The wait and the listening are the same call — the interval the renderer
 /// still owes is exactly how long [`Terminal::poll`] may block — so a resize or
-/// a Ctrl+C is handled during the pause rather than after it, and a frame is
-/// never late by more than one event. A resize changes the engine's width
-/// before the next frame is drawn, keeping the text at the same point of its
-/// trip; the renderer clamps the frame in the meantime, so no frame can be
-/// wider than the terminal it is drawn into.
+/// Ctrl+C is handled during the pause rather than after it, and a frame is
+/// never late by more than one event. A resize reaches `on_resize` before the
+/// next frame is drawn, which re-sizes the engine — and, in big mode,
+/// re-clamps the scale — keeping the text at the same point of its trip.
 ///
 /// Every way out — cycles finished, Ctrl+C, an I/O error — ends with
-/// [`Renderer::finish`], which leaves a clean line and the cursor at column 0.
+/// [`FrameSink::finish`], which leaves a clean line and the cursor at column 0.
 /// A broken pipe is not an error: the reader of a redirected run went away
 /// (`marquee … | head -3`), or the terminal window did, and either way there is
 /// nobody left to scroll for, so the run simply ends and exits 0 in silence.
-fn scroll(
-    prepared: PreparedText,
-    motion: Motion,
-    interval: Duration,
+fn run_loop(
+    mut engine: Engine,
+    mut renderer: impl FrameSink,
     terminal: &mut dyn Terminal,
+    mut on_resize: impl FnMut(usize, usize, &mut Engine),
 ) -> io::Result<()> {
-    let mut engine = Engine::new(prepared, terminal.width(), motion);
-    let mut renderer = Renderer::new(interval);
-
     let outcome = 'scroll: loop {
         match terminal.poll(renderer.delay_until_next_frame()) {
             Ok(events) => {
                 for event in events {
                     match event {
                         TerminalEvent::Quit => break 'scroll Ok(()),
-                        TerminalEvent::Resize { columns, .. } => {
+                        TerminalEvent::Resize { columns, rows } => {
                             // A zero-width report is a window that is hidden or
                             // still being laid out; the last real width is the
                             // better guess, and it keeps the ratio arithmetic
                             // in resize() meaningful.
                             if columns > 0 {
-                                engine.resize(columns);
+                                on_resize(columns, rows, &mut engine);
                             }
                         }
                     }
@@ -140,6 +194,60 @@ fn scroll(
         Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+/// Scrolls one line of text.
+fn scroll(
+    prepared: PreparedText,
+    motion: Motion,
+    interval: Duration,
+    terminal: &mut dyn Terminal,
+) -> io::Result<()> {
+    let engine = Engine::new(prepared, terminal.width(), motion);
+    let renderer = Renderer::new(interval);
+    run_loop(engine, renderer, terminal, |columns, _rows, engine| {
+        engine.resize(columns);
+    })
+}
+
+/// Scrolls the text as big pixel glyphs over `6·scale` rows.
+///
+/// The requested scale is fitted to the terminal height (§4: `6·scale ≤
+/// term_rows − 1`) before the first frame, and re-fitted on every resize —
+/// each time it actually changes, a notice goes to stderr so the user knows
+/// why their `--scale` was reduced.
+fn scroll_big(
+    prepared: PreparedText,
+    motion: Motion,
+    interval: Duration,
+    requested_scale: usize,
+    face: &BigFontFace<'static>,
+    terminal: &mut dyn Terminal,
+) -> io::Result<()> {
+    let (columns, rows) = terminal.size();
+    let clamp = clamp_scale(requested_scale, rows);
+    if clamp.clamped {
+        clamp_notice(clamp.requested, clamp.applied, rows);
+    }
+    let strip = BigStrip::build(&prepared, face, clamp.applied);
+    let engine = Engine::new_big(strip, columns, motion);
+    let renderer = BigRenderer::new(interval);
+    let mut applied = clamp.applied;
+
+    run_loop(engine, renderer, terminal, |columns, rows, engine| {
+        let clamp = engine.resize_big(columns, rows);
+        if clamp.applied != applied {
+            clamp_notice(clamp.requested, clamp.applied, rows);
+            applied = clamp.applied;
+        }
+    })
+}
+
+/// The stderr notice for a `--scale` the terminal cannot fit.
+fn clamp_notice(requested: usize, applied: usize, rows: usize) {
+    eprintln!(
+        "marquee: --scale {requested} does not fit {rows} terminal rows; scrolling at --scale {applied}"
+    );
 }
 
 #[cfg(test)]
@@ -368,5 +476,214 @@ mod tests {
             text.lines().all(|line| line.width() == 12),
             "every line fills the width: {text:?}"
         );
+    }
+
+    // ---- the big-font run loop (T-12) ----
+
+    use crate::bigfont::BigFontFace;
+
+    /// Runs the real big loop with `args` against a fake terminal.
+    fn scroll_big_with(args: &[&str], terminal: &mut dyn Terminal) -> io::Result<()> {
+        let cli = Cli::try_parse_from(std::iter::once("marquee").chain(args.iter().copied()))
+            .expect("the command line should parse");
+        let text = cli.text().expect("a test always passes a TEXT");
+        let face = BigFontFace::embedded_zh_hans().expect("the committed asset parses");
+        scroll_big(
+            prepare(text),
+            motion_for(&cli),
+            cli.frame_interval(),
+            cli.scale(),
+            &face,
+            terminal,
+        )
+    }
+
+    /// A frame with the escape sequences stripped: just the printed text.
+    fn strip_escapes(frame: &str) -> String {
+        let mut plain = String::new();
+        let mut rest = frame;
+        while let Some(at) = rest.find('\x1b') {
+            plain.push_str(&rest[..at]);
+            let after = &rest[at + 1..];
+            let end = after
+                .find(['A', 'B', 'G', 'K', 'h'])
+                .map(|i| i + 1)
+                .unwrap_or(after.len());
+            rest = &after[end..];
+        }
+        plain.push_str(rest);
+        plain
+    }
+
+    #[test]
+    fn big_once_scrolls_one_cycle_of_rows_and_cleans_up() {
+        // 你好 at scale 1: 24 cell columns; a 12-wide viewport, no gap.
+        let args = ["--big", "--once", "--gap", "0", "--speed", "1", "你好"];
+        let mut terminal = FakeTerminal::new(12, 24);
+        let expected = 12 + 24; // one cycle of travel
+
+        scroll_big_with(&args, &mut terminal).expect("a fake never fails");
+
+        let frames = terminal.frames();
+        assert_eq!(
+            frames.len(),
+            expected + 1,
+            "one frame per column plus cleanup"
+        );
+        for frame in &frames[..expected] {
+            assert!(
+                frame.starts_with("\x1b[1G\x1b[5A\x1b[2K"),
+                "six rows from the top of the region: {frame:?}"
+            );
+            assert_eq!(frame.matches("\x1b[2K").count(), 6, "one clear per row");
+            assert_eq!(
+                strip_escapes(frame).chars().count(),
+                72,
+                "6 rows × 12 columns"
+            );
+        }
+        // The cleanup: six cleared rows, no text.
+        assert_eq!(strip_escapes(&frames[expected]).chars().count(), 0);
+        assert_eq!(frames[expected].matches("\x1b[2K").count(), 6);
+        assert!(
+            !terminal.written().contains('\n'),
+            "a big scroll never emits a newline: {:?}",
+            terminal.written()
+        );
+    }
+
+    #[test]
+    fn big_scale_is_clamped_to_the_terminal_height() {
+        // 20 rows fit a scale of at most (20−1)/6 = 3: 18 rows of cells.
+        let args = [
+            "--big", "--once", "--gap", "0", "--speed", "1", "--scale", "4", "中",
+        ];
+        let mut terminal = FakeTerminal::new(12, 20);
+
+        scroll_big_with(&args, &mut terminal).expect("a fake never fails");
+
+        let frames = terminal.frames();
+        for frame in &frames[..frames.len() - 1] {
+            assert!(
+                frame.starts_with("\x1b[1G\x1b[17A\x1b[2K"),
+                "18 rows from the top of the region: {frame:?}"
+            );
+            assert_eq!(frame.matches("\x1b[2K").count(), 18);
+            assert_eq!(strip_escapes(frame).chars().count(), 18 * 12);
+        }
+    }
+
+    #[test]
+    fn a_big_resize_adapts_the_width_and_reclamps_the_scale_live() {
+        // Scale 2 (12 rows) in a 40-row terminal; the window then shrinks to
+        // 8 rows, which fits only scale 1: 6 rows from the next frame on.
+        let args = [
+            "--big", "--repeat", "1", "--gap", "0", "--speed", "1", "--scale", "2", "中",
+        ];
+        let mut terminal = FakeTerminal::new(60, 40);
+        terminal.push_resize_at(4, 30, 8);
+
+        scroll_big_with(&args, &mut terminal).expect("a fake never fails");
+
+        let frames = terminal.frames();
+        assert!(
+            frames.len() > 5,
+            "the scroll should have run on: {frames:?}"
+        );
+        for frame in &frames[..3] {
+            assert_eq!(frame.matches("\x1b[2K").count(), 12, "scale 2 is 12 rows");
+            assert_eq!(strip_escapes(frame).chars().count(), 12 * 60, "{frame:?}");
+        }
+        for frame in &frames[3..frames.len() - 1] {
+            assert_eq!(
+                frame.matches("\x1b[2K").count(),
+                6,
+                "the re-clamped scale 1 is 6 rows: {frame:?}"
+            );
+            assert_eq!(strip_escapes(frame).chars().count(), 6 * 30, "{frame:?}");
+        }
+    }
+
+    #[test]
+    fn big_ctrl_c_stops_mid_scroll_and_leaves_the_rows_clean() {
+        let mut terminal = FakeTerminal::new(12, 24);
+        terminal.push_event_at(4, TerminalEvent::Quit);
+
+        scroll_big_with(&["--big", "--speed", "1", "你好世界"], &mut terminal)
+            .expect("Ctrl+C is a clean exit, not an error");
+
+        let frames = terminal.frames();
+        assert_eq!(frames.len(), 4, "three frames plus the cleanup");
+        for frame in &frames[..3] {
+            assert_eq!(frame.matches("\x1b[2K").count(), 6, "{frame:?}");
+        }
+        assert_eq!(strip_escapes(&frames[3]).chars().count(), 0);
+        assert_eq!(
+            frames[3].matches("\x1b[2K").count(),
+            6,
+            "all six rows erased"
+        );
+        assert!(
+            !terminal.written().contains('\n'),
+            "{:?}",
+            terminal.written()
+        );
+    }
+
+    #[test]
+    fn every_main_mode_option_keeps_working_in_big_mode() {
+        // Bounce, direction, repeat, align and no-color all parse and run:
+        // a bouncing run does there-and-back, so exactly one cycle is
+        // 2×(travel + gap) frames.
+        let args = [
+            "--big",
+            "--bounce",
+            "--direction",
+            "right",
+            "--align",
+            "center",
+            "--no-color",
+            "--repeat",
+            "1",
+            "--gap",
+            "0",
+            "--speed",
+            "1",
+            "你好",
+        ];
+        let mut terminal = FakeTerminal::new(12, 24);
+
+        scroll_big_with(&args, &mut terminal).expect("a fake never fails");
+
+        let frames = terminal.frames();
+        assert_eq!(
+            frames.len(),
+            2 * (12 + 24) + 1,
+            "one bounce cycle plus cleanup"
+        );
+        for frame in &frames[..frames.len() - 1] {
+            assert_eq!(frame.matches("\x1b[2K").count(), 6, "{frame:?}");
+        }
+    }
+
+    #[test]
+    fn a_broken_pipe_ends_a_big_scroll_quietly() {
+        let mut terminal = Failing {
+            columns: 10,
+            kind: io::ErrorKind::BrokenPipe,
+        };
+        scroll_big_with(&["--big", "--speed", "1", "abcd"], &mut terminal)
+            .expect("a closed pipe is not an error");
+    }
+
+    #[test]
+    fn any_other_big_write_failure_is_still_reported() {
+        let mut terminal = Failing {
+            columns: 10,
+            kind: io::ErrorKind::WriteZero,
+        };
+        let err = scroll_big_with(&["--big", "--once", "--speed", "1", "abcd"], &mut terminal)
+            .expect_err("a real I/O failure must not be swallowed");
+        assert_eq!(err.kind(), io::ErrorKind::WriteZero);
     }
 }
