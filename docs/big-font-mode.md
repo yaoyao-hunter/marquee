@@ -1,8 +1,6 @@
 # Big-Font Mode 设计文档（fusion-pixel-font 超大字幕滚动）
 
-状态：Draft — 待评审
-分支：feat/big-font-mode
-关联看板：vuv P-1 (marquee)，T-9..T-12（本次新增拆分）
+状态：Design（已按此实现）
 
 ## 1. 目标
 
@@ -149,17 +147,7 @@ tools/gen-bigfont/    // BDF → assets/bigfont-*.bin（开发期工具，worksp
    → 提供 ja 变体资产 + `--font ja`，或 V1 只做 zh-Hans 并在 README 说明。
 2. **行高**：终端实际 cell 比例并非精确 2:1（字体相关），某些终端下
    大字会有轻微纵向拉伸感 —— 属于终端渲染固有现象，接受。
-3. **tmux/SSH 带宽**：多行帧的 escape 序列量约为单行模式的 6×scale 倍，
-   低速链路上需实测；必要时提供 `--scale 1` 降载建议写入 README。
-4. 资产再生成流程要可复现：tools/gen-bigfont 记录字体 release tag + sha256。
+ 3. **tmux/SSH 带宽**：多行帧的 escape 序列量约为单行模式的 6×scale 倍，
+    低速链路上需实测；必要时提供 `--scale 1` 降载建议写入 README。
+ 4. 资产再生成流程要可复现：tools/gen-bigfont 记录字体 release tag + sha256。
 
-## 10. 任务拆分（提交至 vuv P-1）
-
-- T-9  `bigfont-asset-pipeline` — tools/gen-bigfont + 资产生成 + OFL 许可文件
-  （依赖 T-2 unicode-cells：cluster→字形映射语义）
-- T-10 `bigfont-raster` — asset.rs/raster.rs：加载、查表、half-block 光栅化
-  （依赖 T-9）
-- T-11 `bigfont-engine` — Engine 的 big-strip 运动学与切片裁剪
-  （依赖 T-5 scroll-engine、T-10）
-- T-12 `bigfont-renderer-cli` — 多行渲染器 + `--big/--scale/--font` + 集成冒烟
-  （依赖 T-7 run-loop、T-11）
