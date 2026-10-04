@@ -80,8 +80,11 @@ echo "建设中" | marquee --big --direction right
 - 单色前景（`--color` 沿用主模式选项；`--no-color` 时不输出 SGR）。
   V1 不需要 256/truecolor 双色 cell。
 - 一个 12×12 全角字 → 12 列 × 6 行 cell；`--scale s` → 每像素放大为
-  s×s cell：字面 12s 列 × 6s 行。scale 默认 1，上限由终端高度决定：
-  `6s <= term_rows - 1`（留 1 行余量），超出自动 clamp 并在 stderr 提示。
+  s×s cell：字面 12s 列 × 6s 行。scale 默认 1。终端尺寸限定（修订）：
+  启动时要求 `cols ≥ 12s`（完整显示一个全角字）且 `rows ≥ 6s + 1`
+  （字形行 + 1 行余量），不满足直接报错退出（exit 2，stderr 给出
+  最小尺寸要求）；运行中 resize 跌破限定则 stderr 提示一次最小尺寸、
+  降 scale 继续滚动，窗口恢复后 scale 回弹到请求值。
 - 帧缓冲：`Vec<CellBuf>`（rows × width 的 enum 2bit 状态），每帧只重算
   viewport 覆盖的字形列；行间用 `cursor move to column 1 + 上一行`，
   整帧一次 `write + flush`（与主模式的低闪烁策略一致）。
@@ -98,8 +101,9 @@ echo "建设中" | marquee --big --direction right
 - 与 grapheme cluster 的对齐：主模式按 display width 滚动；big 模式
   按 cluster → 字形序列展开后的像素列滚动，切片边界落在字形内部时
   裁剪字形（左/右半字），保证视觉连续、不跳列。
-- resize：宽变化 → 重算 viewport；高变化 → 重新 clamp scale。
-  位置换算沿用 T-5 的 resize 规则（按列比例保持相位）。
+- resize：宽变化 → 重算 viewport；高变化 → 按*请求的* scale 重新 clamp
+  （缩小降级、恢复回弹）。位置换算沿用 T-5 的 resize 规则（按列比例保持相位）。
+  跌破 §4 尺寸限定时不退出：stderr 提示一次最小尺寸要求，降级继续滚动。
 
 ## 6. 架构与模块
 
@@ -123,7 +127,7 @@ tools/gen-bigfont/    // BDF → assets/bigfont-*.bin（开发期工具，worksp
 
 ```
 --big               启用超大字模式（fusion-pixel 12px 点阵）
---scale <N>         放大倍数，默认 1，按终端高度自动 clamp
+--scale <N>         放大倍数，默认 1；终端不满足尺寸限定则报错退出
 --font <NAME>       预留：zh-hans（默认）| ja | zh-hant（按打包资产）
 ```
 
