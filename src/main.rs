@@ -13,6 +13,9 @@ use clap::Parser;
 /// scroll.
 const EXIT_USAGE: u8 = 2;
 
+/// Exit code for an I/O failure while drawing.
+const EXIT_IO: u8 = 1;
+
 fn main() -> ExitCode {
     let cli = cli::Cli::parse();
 
@@ -28,12 +31,18 @@ fn main() -> ExitCode {
         }
     };
 
-    // Stub: one static frame. T-7 turns this into the paced scroll loop that
-    // honours the rest of `cli` (direction, bounce, gap, align, cycles,
-    // frame interval, colour) and adapts to resizes.
-    let prepared = unicode::prepare(&text);
-    let engine = marquee::Engine::new(prepared, terminal::width());
-    renderer::render_frame(&engine);
+    // Stub: one static frame, after which dropping the terminal restores
+    // cursor and mode. T-7 replaces this with the paced scroll loop that
+    // honours the rest of `cli` (direction, bounce, gap, align, cycles, frame
+    // interval, colour) and reacts to the resize and quit events the terminal
+    // reports.
+    let mut terminal = terminal::open();
+    let engine = marquee::Engine::new(unicode::prepare(&text), terminal.width());
+    if let Err(err) = renderer::render_frame(&mut terminal, &engine).and_then(|()| terminal.flush())
+    {
+        eprintln!("marquee: {err}");
+        return ExitCode::from(EXIT_IO);
+    }
 
     ExitCode::SUCCESS
 }
