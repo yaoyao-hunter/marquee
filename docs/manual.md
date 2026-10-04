@@ -1,5 +1,7 @@
 # marquee big-font mode — manual
 
+Chinese version: [manual.zh-CN.md](manual.zh-CN.md)
+
 `--big` scrolls the text as large pixel glyphs spanning several terminal rows
 instead of one line of terminal characters: every grapheme cluster maps to a
 glyph of the embedded [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font)
@@ -15,8 +17,8 @@ echo "under construction" | marquee --big --direction right
 This manual covers big-font usage completely: the flags, the geometry, the
 scrolling behaviour, the size limits, input, redirected output and exit
 behaviour. The single-line mode and the general rules (input precedence, exit
-codes, environment) are documented in [docs/marquee.1](marquee.1) and the
-[README](../README.md); nothing there changes except what is stated below.
+codes, environment, themes) are documented in [docs/marquee.1](marquee.1) and
+the [README](../README.md); nothing there changes except what is stated below.
 
 ## Turning it on
 
@@ -37,8 +39,12 @@ codes, environment) are documented in [docs/marquee.1](marquee.1) and the
 
 - Each font pixel becomes an `N×N` block of terminal cells at
   `--scale N` (`N = 1` by default), drawn with the half-block characters
-  `█` `▀` `▄` and spaces, in the terminal's monochrome foreground. No colour
-  escape sequences are emitted, so `--no-color` has nothing to switch off.
+  `█` `▀` `▄` and spaces, in the theme's foreground colour (the terminal's
+  default when the theme is `default`). A theme's background colours the
+  blank cells; a plain theme emits no colour escape sequences at all, so
+  `--no-color` simply forces it. A palette theme (a list of colours) is
+  banded down the screen columns, `band` cells per colour, so one glyph
+  wider than a band shows several colours at once.
 - A full-width glyph (CJK, full-width punctuation) is 12×12 font pixels, so
   `12·N` columns × `6·N` rows of cells. A half-width glyph (ASCII letters,
   digits, punctuation) is 6×12 pixels, so `6·N` columns × `6·N` rows.
@@ -66,15 +72,28 @@ with columns now counted in terminal cells:
 - `--bounce` reverses at both edges instead of wrapping around; a bounce
   cycle is the trip to one edge, the `--gap`, the trip back, and the `--gap`
   again.
-- `--gap COLUMNS` (default 8) counts blank cell columns between cycles.
+- `--continuous` tiles the glyphs into a stream: the next copy of the strip
+  follows the previous one `--gap` cell columns behind it, so the screen
+  never empties once the first copy has entered (while the gap is narrower
+  than the viewport). A cycle is then one period of the stream — the strip
+  plus its gap — and `--once`/`--repeat` count periods. It conflicts with
+  `--bounce`.
+- `--gap COLUMNS` (default 8) counts blank cell columns between cycles, or
+  between consecutive copies in continuous mode.
 - `--once` and `--repeat N` bound the run; the same exit status 0 applies.
 - `--align` has no effect in big mode (it is accepted but not implemented
   anywhere yet).
+- `--theme` and `--theme-file` paint the half-blocks as in the single-line
+  mode: the theme's foreground colours the blocks, its background the blank
+  cells. A solid theme carries its colour sequences once, around the whole
+  `6·N`-row frame; a palette colours the rows band by band.
 
 A frame is exactly the terminal's width in columns, always. When the viewport
 edge cuts through a glyph, the glyph is clipped at that edge — a half `你`
 enters and leaves the screen smoothly — so the motion never jumps a column
-and nothing wraps to the next line.
+and nothing wraps to the next line. In continuous mode the same clipping
+applies to every copy of the stream, and the copies tile the viewport
+without gaps or overlaps.
 
 ## Size limits and resize
 
@@ -151,10 +170,16 @@ least 24 columns by 13 rows:
 marquee "你好世界" --big --scale 2
 ```
 
-Fast, from a pipe, mirrored direction:
+Fast, from a pipe, mirrored direction, following itself:
 
 ```sh
-echo "正在部署..." | marquee --big --fps 60 --direction right
+echo "正在部署..." | marquee --big --fps 60 --direction right --continuous
+```
+
+Themed — the half-blocks in bold bright green, blanks untouched:
+
+```sh
+marquee --big --scale 2 "ON AIR" --theme matrix
 ```
 
 Bouncing billboard with a tight gap, exactly three cycles:
@@ -181,9 +206,11 @@ marquee --big --once "done" > frames.txt
 
 - `--align` is accepted and validated but has no effect (reserved for a
   static placement mode).
-- `--no-color` is accepted without effect: big mode is monochrome by design
-  and emits no colour escapes.
 - Only the `zh-hans` atlas is packaged; `ja` and `zh-hant` need their
   generated assets committed first.
-- No proportional variants, no colour, no vertical scrolling — the V1 scope
-  in `docs/big-font-mode.md`.
+- No per-mode themes — one theme paints the single line and big mode the
+  same way, and palette bands are screen-fixed: colour that travels with
+  the text (each cluster keeping its own colour) is not in the theme
+  grammar yet.
+- No proportional variants, no colour beyond the theme grammar, no vertical
+  scrolling — the V1 scope in `docs/big-font-mode.md`.
