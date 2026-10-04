@@ -99,7 +99,8 @@ option works in big mode; `--align` has no effect there either.
 
 The full reference — every flag, the input rule, exit codes, environment — is
 the manual page: [docs/marquee.1](docs/marquee.1), read it with
-`man docs/marquee.1`.
+`man docs/marquee.1`. Big-font mode has its own complete manual in markdown:
+[docs/manual.md](docs/manual.md).
 
 ## Unicode & CJK
 
