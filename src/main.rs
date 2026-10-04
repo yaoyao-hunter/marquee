@@ -6,6 +6,7 @@ mod cli;
 mod marquee;
 mod renderer;
 mod terminal;
+mod theme;
 mod unicode;
 
 use std::io::{self, IsTerminal};
@@ -19,13 +20,15 @@ use cli::Cli;
 use marquee::{BigStrip, Direction, Engine, Motion, min_term_size};
 use renderer::{BigRenderer, Renderer};
 use terminal::{Terminal, TerminalEvent};
+use theme::{Registry, Theme, ThemeError};
 use unicode::{PreparedText, prepare};
 
 /// Exit code for an I/O failure while drawing.
 const EXIT_IO: u8 = 1;
 
 /// Exit code for a usage error: bad flags (clap's own code), no text to
-/// scroll, or a terminal too small for the big mode asked for.
+/// scroll, a theme that cannot be resolved, or a terminal too small for
+/// the big mode asked for.
 const EXIT_USAGE: u8 = 2;
 
 /// Scrolls `TEXT` — or piped stdin — across the terminal's current line until
@@ -34,12 +37,21 @@ const EXIT_USAGE: u8 = 2;
 /// Exit codes: `0` for a scroll that ran its cycles, one the user stopped with
 /// Ctrl+C, and one whose reader went away (`marquee … | head`); `1` when
 /// drawing failed for a real reason; `2` for a usage error (clap's own code for
-/// bad flags, or a terminal smaller than big mode needs).
+/// bad flags, no text, an unusable theme, or a terminal smaller than big
+/// mode needs).
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let text = match cli::resolve_text(&cli, io::stdin().is_terminal(), io::stdin().lock()) {
         Ok(text) => text,
+        Err(err) => {
+            eprintln!("marquee: {err}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+
+    let theme = match resolve_theme(&cli, no_color_from_env()) {
+        Ok(theme) => theme,
         Err(err) => {
             eprintln!("marquee: {err}");
             return ExitCode::from(EXIT_USAGE);
@@ -61,6 +73,7 @@ fn main() -> ExitCode {
                 prepare(&text),
                 motion_for(&cli),
                 cli.frame_interval(),
+                theme,
                 cli.scale(),
                 &face,
                 &mut *terminal,
@@ -72,6 +85,7 @@ fn main() -> ExitCode {
             prepare(&text),
             motion_for(&cli),
             cli.frame_interval(),
+            theme,
             &mut *terminal,
         )
     };
@@ -86,6 +100,55 @@ fn main() -> ExitCode {
             ExitCode::from(EXIT_IO)
         }
     }
+}
+
+/// The theme `--theme` asked for, from the registry of built-ins merged with
+/// the theme file — or the plain theme when colour is off. The name is
+/// validated either way, so a typo in `--theme nope --no-color` is still
+/// reported rather than silently ignored.
+fn resolve_theme(cli: &Cli, no_color: bool) -> Result<Theme, ThemeError> {
+    let mut registry = Registry::builtins();
+    let file = match cli.theme_file() {
+        // An explicit file must exist and parse; the default location is
+        // optional — no file simply means the built-ins.
+        Some(path) => Some((path.to_path_buf(), true)),
+        None => theme::default_theme_path().map(|path| (path, false)),
+    };
+    if let Some((path, required)) = file {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let user = theme::parse_theme_file(&text)?;
+                registry.extend(user);
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound && !required => {}
+            Err(err) => {
+                return Err(ThemeError::Read {
+                    path: path.to_path_buf(),
+                    err,
+                });
+            }
+        }
+    }
+
+    let theme = registry
+        .lookup(cli.theme())
+        .cloned()
+        .ok_or_else(|| ThemeError::UnknownTheme {
+            name: cli.theme().to_string(),
+            available: registry.names().into_iter().map(str::to_string).collect(),
+        })?;
+    if no_color || !cli.color_enabled() {
+        // The user asked for no colour at all: the theme resolves to the
+        // plain one, which emits nothing.
+        return Ok(Theme::default());
+    }
+    Ok(theme)
+}
+
+/// Whether the environment says colour is off: a non-empty `NO_COLOR` (the
+/// https://no-color.org convention — an empty value means "not set").
+fn no_color_from_env() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
 }
 
 /// The packaged atlas the command line asked for.
@@ -106,6 +169,7 @@ fn motion_for(cli: &Cli) -> Motion {
             cli::Direction::Right => Direction::Right,
         },
         bounce: cli.bounce(),
+        continuous: cli.continuous(),
         gap: cli.gap() as usize,
         cycles: cli.cycles(),
     }
@@ -209,10 +273,11 @@ fn scroll(
     prepared: PreparedText,
     motion: Motion,
     interval: Duration,
+    theme: Theme,
     terminal: &mut dyn Terminal,
 ) -> io::Result<()> {
     let engine = Engine::new(prepared, terminal.width(), motion);
-    let renderer = Renderer::new(interval);
+    let renderer = Renderer::new(interval, theme);
     run_loop(engine, renderer, terminal, |columns, _rows, engine| {
         engine.resize(columns);
     })
@@ -226,17 +291,19 @@ fn scroll(
 /// down when the window shrinks, back up when it grows again — and one
 /// notice goes to stderr naming the size the run needs, without stopping
 /// the scroll.
+#[allow(clippy::too_many_arguments)]
 fn scroll_big(
     prepared: PreparedText,
     motion: Motion,
     interval: Duration,
+    theme: Theme,
     requested_scale: usize,
     face: &BigFontFace<'static>,
     terminal: &mut dyn Terminal,
 ) -> io::Result<()> {
     let strip = BigStrip::build(&prepared, face, requested_scale);
     let engine = Engine::new_big(strip, terminal.width(), motion);
-    let renderer = BigRenderer::new(interval);
+    let renderer = BigRenderer::new(interval, theme);
     // Whether the too-small notice is already standing on stderr, so a run
     // that dips below the limit says it once, not once per resize event.
     let mut noticed = false;
@@ -295,7 +362,8 @@ mod tests {
 
     /// Runs the real loop with `args` against a fake terminal. The text comes
     /// from the command line, never from stdin: a test must not depend on how
-    /// it was started.
+    /// it was started, nor on whatever themes the developer's home holds —
+    /// the plain theme is what the run gets.
     fn scroll_with(args: &[&str], terminal: &mut dyn Terminal) -> io::Result<()> {
         let cli = Cli::try_parse_from(std::iter::once("marquee").chain(args.iter().copied()))
             .expect("the command line should parse");
@@ -304,6 +372,7 @@ mod tests {
             prepare(text),
             motion_for(&cli),
             cli.frame_interval(),
+            Theme::default(),
             terminal,
         )
     }
@@ -511,11 +580,329 @@ mod tests {
         );
     }
 
+    // ---- continuous scrolling (--continuous) ----
+
+    #[test]
+    fn continuous_scrolls_periods_and_repeats_count_them() {
+        for periods in [1u32, 3] {
+            let wanted = periods.to_string();
+            let args = ["--speed", "1", "--continuous", "--repeat", &wanted, "ab"];
+            let mut terminal = FakeTerminal::new(6, 3);
+            // One period: "ab" (2) + gap 8 = 10 frames.
+            let period = reference(&args, 6).cycle();
+
+            scroll_with(&args, &mut terminal).expect("a fake never fails");
+
+            assert_eq!(
+                terminal.frames().len(),
+                period * usize::try_from(periods).unwrap() + 1,
+                "{periods} periods of {period} frames plus cleanup"
+            );
+            assert_eq!(terminal.frames().last(), Some(&CLEAN_LINE.to_string()));
+            assert!(
+                !terminal.written().contains('\n'),
+                "a continuous scroll never emits a newline"
+            );
+        }
+    }
+
+    #[test]
+    fn a_continuous_run_never_shows_a_blank_frame_once_started() {
+        // 6-wide viewport, "abcd" with gap 4: the gap is narrower than the
+        // viewport, so after the first column enters every frame shows
+        // something — which is the whole point of --continuous.
+        let args = [
+            "--speed",
+            "1",
+            "--continuous",
+            "--gap",
+            "4",
+            "--repeat",
+            "3",
+            "abcd",
+        ];
+        let mut terminal = FakeTerminal::new(6, 3);
+
+        scroll_with(&args, &mut terminal).expect("a fake never fails");
+
+        let frames = &terminal.frames()[..terminal.frames().len() - 1];
+        let entered = frames
+            .iter()
+            .position(|frame| visible(frame).trim() != "")
+            .expect("the text enters");
+        assert!(
+            frames[entered..]
+                .iter()
+                .all(|frame| visible(frame).trim() != ""),
+            "a blank frame after column {entered}: {:?}",
+            &frames[entered..]
+        );
+    }
+
+    // ---- the theme layer (--theme, --theme-file, NO_COLOR) ----
+
+    /// A theme file in the temp dir, with a per-test name so parallel tests
+    /// cannot collide. Returned as the `--theme-file` path.
+    fn theme_file(name: &str, contents: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("marquee-theme-{name}-{}.toml", std::process::id()));
+        std::fs::write(&path, contents).expect("the temp dir is writable");
+        path
+    }
+
+    fn cli_with(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("marquee").chain(args.iter().copied()))
+            .expect("the command line should parse")
+    }
+
+    #[test]
+    fn a_theme_file_overrides_builtins_and_adds_new_themes() {
+        let path = theme_file(
+            "user",
+            "[alarm]\nfg = cyan\n\n[mine]\nfg = \"#7fd4ff\"\nbg = blue\nbold = true\n",
+        );
+        let cli = cli_with(&[
+            "--theme-file",
+            path.to_str().expect("a temp path is UTF-8"),
+            "--theme",
+            "mine",
+            "hi",
+        ]);
+
+        let theme = resolve_theme(&cli, false).expect("the file resolves");
+        assert_eq!(
+            theme,
+            Theme {
+                fg: vec![theme::Color::Rgb {
+                    red: 0x7f,
+                    green: 0xd4,
+                    blue: 0xff
+                }],
+                bg: vec![theme::Color::Blue],
+                bold: true,
+                ..Theme::default()
+            }
+        );
+
+        // A built-in overridden by the file resolves to the file's version.
+        let cli = cli_with(&[
+            "--theme-file",
+            path.to_str().expect("a temp path is UTF-8"),
+            "--theme",
+            "alarm",
+            "hi",
+        ]);
+        assert_eq!(
+            resolve_theme(&cli, false).expect("alarm resolves"),
+            Theme {
+                fg: vec![theme::Color::Cyan],
+                ..Theme::default()
+            }
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_built_in_theme_resolves_without_any_file() {
+        // An empty theme file contributes nothing, so the built-ins stand:
+        // testing them through a file keeps the test off the developer's
+        // real default location.
+        let path = theme_file("empty", "");
+        let file = path.to_str().expect("a temp path is UTF-8");
+
+        let cli = cli_with(&["--theme-file", file, "--theme", "matrix", "hi"]);
+        let theme = resolve_theme(&cli, false).expect("matrix is built in");
+        assert_eq!(
+            theme,
+            Theme {
+                fg: vec![theme::Color::BrightGreen],
+                bold: true,
+                ..Theme::default()
+            }
+        );
+
+        let cli = cli_with(&["--theme-file", file, "--theme", "rainbow", "hi"]);
+        let theme = resolve_theme(&cli, false).expect("rainbow is built in");
+        assert_eq!(theme.fg.len(), 6, "a six-colour palette: {theme:?}");
+
+        let cli = cli_with(&["--theme-file", file, "hi"]);
+        assert_eq!(
+            resolve_theme(&cli, false).expect("default is the plain theme"),
+            Theme::default()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unknown_theme_is_a_usage_error_listing_the_registry() {
+        let path = theme_file("listing", "[mine]\nfg = red\n");
+        let cli = cli_with(&[
+            "--theme-file",
+            path.to_str().expect("a temp path is UTF-8"),
+            "--theme",
+            "nope",
+            "hi",
+        ]);
+        let err = resolve_theme(&cli, false).expect_err("nope is nowhere");
+        let message = err.to_string();
+        assert!(message.contains("nope"), "{message}");
+        assert!(message.contains("mine"), "{message}");
+        assert!(message.contains("matrix"), "{message}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_bad_theme_file_is_reported_with_its_line() {
+        let path = theme_file("broken", "[a]\nwhat = 1\n");
+        let cli = cli_with(&[
+            "--theme-file",
+            path.to_str().expect("a temp path is UTF-8"),
+            "hi",
+        ]);
+        let err = resolve_theme(&cli, false).expect_err("the file is malformed");
+        let message = err.to_string();
+        assert!(message.contains("line 2"), "{message}");
+        assert!(message.contains("unknown key"), "{message}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_missing_explicit_theme_file_is_reported_not_silently_skipped() {
+        let missing = std::env::temp_dir().join("marquee-theme-absent.toml");
+        let _ = std::fs::remove_file(&missing);
+        let cli = cli_with(&[
+            "--theme-file",
+            missing.to_str().expect("a temp path is UTF-8"),
+            "hi",
+        ]);
+        let err = resolve_theme(&cli, false).expect_err("the file must exist");
+        assert!(matches!(err, ThemeError::Read { .. }), "{err}");
+        assert!(err.to_string().contains("cannot read"), "{err}");
+    }
+
+    #[test]
+    fn no_color_forces_the_plain_theme_but_validates_the_name() {
+        // A typo is still reported even when colour is off: fail fast on
+        // the flag the user actually typed.
+        let cli = cli_with(&["--no-color", "--theme", "nope", "hi"]);
+        assert!(resolve_theme(&cli, false).is_err(), "the name is validated");
+
+        let cli = cli_with(&["--no-color", "--theme", "matrix", "hi"]);
+        assert_eq!(
+            resolve_theme(&cli, false).expect("resolves, then discards"),
+            Theme::default()
+        );
+
+        // NO_COLOR from the environment does the same to --theme.
+        let cli = cli_with(&["--theme", "alarm", "hi"]);
+        assert_eq!(
+            resolve_theme(&cli, true).expect("resolves, then discards"),
+            Theme::default()
+        );
+    }
+
+    #[test]
+    fn a_themed_run_paints_every_frame_and_ends_uncoloured() {
+        // End to end through the real loop: the frames carry the theme's
+        // SGR, the cleanup does not, and the run still ends clean.
+        let path = theme_file("e2e", "[testy]\nfg = red\nbold = true\n");
+        let args = [
+            "--speed",
+            "1",
+            "--once",
+            "--gap",
+            "0",
+            "--theme-file",
+            path.to_str().expect("a temp path is UTF-8"),
+            "--theme",
+            "testy",
+            "你好",
+        ];
+        let cli = cli_with(&args);
+        let theme = resolve_theme(&cli, false).expect("testy resolves");
+        let mut terminal = FakeTerminal::new(10, 3);
+
+        scroll(
+            prepare(cli.text().expect("a TEXT is given")),
+            motion_for(&cli),
+            cli.frame_interval(),
+            theme,
+            &mut terminal,
+        )
+        .expect("a fake never fails");
+
+        let frames = terminal.frames();
+        let drawn = &frames[..frames.len() - 1];
+        assert!(!drawn.is_empty());
+        for frame in drawn {
+            assert!(frame.contains("\x1b[38;5;1m"), "fg missing: {frame:?}");
+            assert!(frame.contains("\x1b[1m"), "bold missing: {frame:?}");
+            assert!(frame.ends_with("\x1b[0m"), "reset missing: {frame:?}");
+        }
+        assert_eq!(frames.last(), Some(&CLEAN_LINE.to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_palette_run_bands_the_frames_with_the_user_theme() {
+        // A theme file with a colour list: the run resolves it and every
+        // frame is painted band by band, with one reset closing it.
+        let path = theme_file(
+            "palette",
+            "[flow]\nfg = [\"red\", \"#ffd194\"]\nband = 2\nbold = true\n",
+        );
+        let args = [
+            "--speed",
+            "1",
+            "--once",
+            "--gap",
+            "0",
+            "--theme-file",
+            path.to_str().expect("a temp path is UTF-8"),
+            "--theme",
+            "flow",
+            "你好",
+        ];
+        let cli = cli_with(&args);
+        let theme = resolve_theme(&cli, false).expect("flow resolves");
+        assert_eq!(theme.fg.len(), 2);
+        assert_eq!(theme.band, 2);
+        let mut terminal = FakeTerminal::new(10, 3);
+
+        scroll(
+            prepare(cli.text().expect("a TEXT is given")),
+            motion_for(&cli),
+            cli.frame_interval(),
+            theme,
+            &mut terminal,
+        )
+        .expect("a fake never fails");
+
+        let frames = terminal.frames();
+        let drawn = &frames[..frames.len() - 1];
+        assert!(!drawn.is_empty());
+        for frame in drawn {
+            assert!(
+                frame.contains("\x1b[38;5;1m"),
+                "the classic red band: {frame:?}"
+            );
+            assert!(
+                frame.contains("\x1b[38;2;255;209;148m"),
+                "the #ffd194 band: {frame:?}"
+            );
+            assert!(frame.contains("\x1b[1m"), "bold: {frame:?}");
+            assert!(frame.ends_with("\x1b[0m"), "reset missing: {frame:?}");
+        }
+        assert_eq!(frames.last(), Some(&CLEAN_LINE.to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
+
     // ---- the big-font run loop (T-12) ----
 
     use crate::bigfont::BigFontFace;
 
-    /// Runs the real big loop with `args` against a fake terminal.
+    /// Runs the real big loop with `args` against a fake terminal. Like
+    /// [`scroll_with`], always with the plain theme.
     fn scroll_big_with(args: &[&str], terminal: &mut dyn Terminal) -> io::Result<()> {
         let cli = Cli::try_parse_from(std::iter::once("marquee").chain(args.iter().copied()))
             .expect("the command line should parse");
@@ -525,6 +912,7 @@ mod tests {
             prepare(text),
             motion_for(&cli),
             cli.frame_interval(),
+            Theme::default(),
             cli.scale(),
             &face,
             terminal,

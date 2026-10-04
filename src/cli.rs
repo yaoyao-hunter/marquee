@@ -26,6 +26,7 @@
 
 use std::fmt;
 use std::io::{self, BufRead};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
@@ -125,6 +126,22 @@ pub struct Cli {
     #[arg(long)]
     no_color: bool,
 
+    /// Start the next copy of the text before the previous one has left
+    /// the screen, `--gap` columns behind it; cannot be combined with
+    /// --bounce
+    #[arg(long, conflicts_with = "bounce")]
+    continuous: bool,
+
+    /// Colour theme for the text: a built-in name, or one defined in the
+    /// theme file
+    #[arg(long, value_name = "NAME", default_value = "default")]
+    theme: String,
+
+    /// Read user themes from this file instead of the default location
+    /// ($XDG_CONFIG_HOME/marquee/themes.toml)
+    #[arg(long, value_name = "PATH")]
+    theme_file: Option<PathBuf>,
+
     /// Scroll exactly one cycle, then exit (same as --repeat 1)
     #[arg(long, conflicts_with = "repeat")]
     once: bool,
@@ -204,6 +221,22 @@ impl Cli {
     /// additionally turns colour off when stdout is not a terminal.
     pub fn color_enabled(&self) -> bool {
         !self.no_color
+    }
+
+    /// Whether the next copy of the text may follow the previous one onto
+    /// the screen instead of waiting for it to leave.
+    pub fn continuous(&self) -> bool {
+        self.continuous
+    }
+
+    /// The `--theme` name: built-in or from the theme file.
+    pub fn theme(&self) -> &str {
+        &self.theme
+    }
+
+    /// The `--theme-file` path, when one was given.
+    pub fn theme_file(&self) -> Option<&std::path::Path> {
+        self.theme_file.as_deref()
     }
 
     /// Whether the text scrolls as big pixel glyphs over multiple rows.
@@ -351,7 +384,6 @@ mod tests {
             "120",
             "--direction",
             "right",
-            "--bounce",
             "--gap",
             "3",
             "--align",
@@ -359,18 +391,29 @@ mod tests {
             "--no-color",
             "--repeat",
             "4",
+            "--continuous",
+            "--theme",
+            "matrix",
+            "--theme-file",
+            "/tmp/themes.toml",
         ]);
         assert_eq!(cli.text(), Some("hello 世界"));
         assert!(cli.big());
         assert_eq!(cli.scale(), 3);
         assert_eq!(cli.font(), Font::ZhHans);
         assert_eq!(cli.direction(), Direction::Right);
-        assert!(cli.bounce());
+        assert!(!cli.bounce(), "bounce conflicts with continuous");
         assert_eq!(cli.gap(), 3);
         assert_eq!(cli.align(), Align::Center);
         assert!(!cli.color_enabled());
         assert_eq!(cli.cycles(), Some(4));
         assert_eq!(cli.frame_interval(), Duration::from_millis(120));
+        assert!(cli.continuous());
+        assert_eq!(cli.theme(), "matrix");
+        assert_eq!(
+            cli.theme_file(),
+            Some(std::path::Path::new("/tmp/themes.toml"))
+        );
     }
 
     #[test]
@@ -393,6 +436,38 @@ mod tests {
             Font::ZhHans,
             "the packaged atlas is the default"
         );
+        assert!(!cli.continuous(), "continuous is opt-in");
+        assert_eq!(cli.theme(), "default", "the plain theme is the default");
+        assert_eq!(cli.theme_file(), None, "no explicit theme file");
+    }
+
+    #[test]
+    fn continuous_and_bounce_are_contradictions() {
+        // A bounce reverses at the edges; continuous follows itself around
+        // them. Both at once is a usage error naming both.
+        let err = parse(&["--continuous", "--bounce", "hi"])
+            .expect_err("--continuous and --bounce are mutually exclusive");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        let message = err.render().to_string();
+        assert!(message.contains("--continuous"), "{message}");
+        assert!(message.contains("--bounce"), "{message}");
+        assert_eq!(
+            message.matches("cannot be used with").count(),
+            1,
+            "one error, not one per option: {message}"
+        );
+
+        // Either one alone is fine.
+        assert!(parsed(&["--continuous", "hi"]).continuous());
+        assert!(parsed(&["--bounce", "hi"]).bounce());
+    }
+
+    #[test]
+    fn a_theme_name_is_free_form_until_the_registry_judges_it() {
+        // clap cannot know the theme names (users define their own), so
+        // anything parses; resolution and the error listing come later.
+        assert_eq!(parsed(&["--theme", "whatever", "hi"]).theme(), "whatever");
+        assert_eq!(parsed(&["--theme", "matrix", "hi"]).theme(), "matrix");
     }
 
     #[test]
@@ -519,6 +594,9 @@ mod tests {
                 "--align",
                 "--no-color",
                 "--once",
+                "--continuous",
+                "--theme",
+                "--theme-file",
                 "--big",
                 "--scale",
                 "--font",

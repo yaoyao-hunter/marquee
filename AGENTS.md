@@ -47,6 +47,7 @@ main                 # product; always runnable; no normal development here
 |----------------------|----------------------------------------------|-------------|
 | `feat/marquee-core`  | v1 core CLI (unicode, cli, terminal, engine, renderer, run loop, README) | T-2..T-8 |
 | `feat/big-font-mode` | big-font mode design + implementation (docs/big-font-mode.md)            | T-9..T-12 |
+| `feat/themes-and-continuous-scroll` | theme layer (`src/theme.rs`, `--theme`/`--theme-file`) and continuous scrolling (`--continuous`); vuv cards not yet created | — |
 
 ### Integration
 
