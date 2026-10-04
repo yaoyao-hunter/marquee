@@ -92,9 +92,12 @@ above it. Everything else behaves like the single line — no alternate screen,
 one buffered write per frame, and on exit (or Ctrl+C, or a panic) those rows
 are erased and the shell's line comes back blank.
 
-`--scale` is clamped to the terminal height (`6·scale ≤ rows − 1`, one row of
-margin); when that happens a notice goes to stderr explaining the scale that
-actually runs. The same fitting happens live on every resize. Every main-mode
+Big mode names the terminal it needs: at least `12·scale` columns (one whole
+glyph) by `6·scale + 1` rows (the glyph rows plus a line of margin). A smaller
+terminal is refused before the first frame — exit 2, the needed size on
+stderr. A window that shrinks below the limit mid-run does not stop the
+scroll: the scale re-clamps down, and back up when the window grows again,
+with a stderr notice naming the size that restores it. Every main-mode
 option works in big mode; `--align` has no effect there either.
 
 The full reference — every flag, the input rule, exit codes, environment — is
@@ -161,7 +164,7 @@ exit 0. The line it used is given back to the pane, scrollback untouched.
 | `--align <left\|center\|right>` | `left` | accepted, currently no effect — see below |
 | `--no-color` | — | accepted, currently no effect — see below |
 | `--big` | off | scroll as big pixel glyphs over `6·scale` rows |
-| `--scale <N>` | 1 | big-mode pixel magnification (1–32), clamped to the terminal height |
+| `--scale <N>` | 1 | big-mode pixel magnification (1–32); the terminal must fit 12·N columns × (6·N+1) rows |
 | `--font <name>` | `zh-hans` | which packaged pixel font `--big` uses |
 
 `--speed`/`--fps` and `--once`/`--repeat` each conflict with each other, and

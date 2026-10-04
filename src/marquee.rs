@@ -55,7 +55,8 @@
 //! The engine keeps its own [`Direction`] so this core stays free of clap; the
 //! run loop maps `--direction` onto it.
 
-use crate::bigfont::raster::cell_cols;
+use crate::bigfont::asset::WIDTH_FULL_PX;
+use crate::bigfont::raster::{cell_cols, cell_rows};
 use crate::bigfont::{BigFontFace, ResolvedGlyph};
 use crate::unicode::PreparedText;
 
@@ -113,6 +114,9 @@ impl StripKind {
 pub struct BigStrip {
     glyphs: Vec<ResolvedGlyph<'static>>,
     scale: usize,
+    /// The scale the strip was built for: resizes clamp `scale` down when
+    /// the window shrinks and restore it when the window grows back (§5).
+    requested_scale: usize,
 }
 
 // Wired into the engine here; the T-12 renderer is still the only future
@@ -128,7 +132,11 @@ impl BigStrip {
             .iter()
             .map(|cell| face.resolve_cluster(cell.text()))
             .collect();
-        Self { glyphs, scale }
+        Self {
+            glyphs,
+            scale,
+            requested_scale: scale,
+        }
     }
 
     /// The glyphs in strip order, one per cluster.
@@ -179,6 +187,15 @@ pub fn clamp_scale(requested: usize, term_rows: usize) -> ScaleClamp {
         applied,
         clamped: requested > max,
     }
+}
+
+/// The smallest terminal big mode runs `scale` at (§4): the viewport must
+/// show one whole full-width glyph — `12·scale` cell columns — and fit the
+/// `6·scale` glyph rows with one row of margin. The run loop refuses a
+/// smaller terminal before the first frame and reports one that shrinks
+/// below it mid-run, without stopping the scroll.
+pub fn min_term_size(scale: usize) -> (usize, usize) {
+    (cell_cols(WIDTH_FULL_PX, scale), cell_rows(scale) + 1)
 }
 
 /// One visible piece of a big strip: the glyph, clipped to the viewport by
@@ -232,8 +249,9 @@ impl Engine {
     }
 
     /// The big-font twin of [`Engine::new`]: scrolls a big strip through a
-    /// viewport `width` *cell columns* wide. `scale` must already satisfy the
-    /// §4 height rule — see [`clamp_scale`], which the run loop applies.
+    /// viewport `width` *cell columns* wide. The caller guarantees the §4
+    /// size rule — main refuses a terminal smaller than [`min_term_size`]
+    /// before the first frame — and resizes re-clamp via [`clamp_scale`].
     pub fn new_big(strip: BigStrip, width: usize, motion: Motion) -> Self {
         debug_assert!(strip.scale >= 1);
         Self {
@@ -316,16 +334,17 @@ impl Engine {
     }
 
     /// The big-font resize (§5): a new viewport width *and* terminal height.
-    /// The height re-clamps the strip scale via [`clamp_scale`], which may
-    /// change the strip width — both are folded into the same phase-keeping
-    /// rule as [`Engine::resize`]. Returns the [`ScaleClamp`] the run loop
-    /// needs for its stderr notice.
+    /// The height re-clamps the scale from the *requested* one via
+    /// [`clamp_scale`] — down when the window shrinks, back up when it grows
+    /// again — which may change the strip width; both are folded into the
+    /// same phase-keeping rule as [`Engine::resize`]. Returns the
+    /// [`ScaleClamp`] the run loop needs for its stderr notice.
     pub fn resize_big(&mut self, width: usize, term_rows: usize) -> ScaleClamp {
         let StripKind::Big(strip) = &mut self.strip else {
             panic!("resize_big on a text engine");
         };
-        let clamp = clamp_scale(strip.scale, term_rows);
-        if width == self.width && !clamp.clamped {
+        let clamp = clamp_scale(strip.requested_scale, term_rows);
+        if width == self.width && clamp.applied == strip.scale {
             return clamp;
         }
         let new_scale = clamp.applied;
@@ -1193,6 +1212,63 @@ mod tests {
 
         let clamp = engine.resize_big(70, 100); // scale 2 fits 100 rows
         assert!(!clamp.clamped);
+        assert_eq!(engine.offset(), settled);
+    }
+
+    #[test]
+    fn min_term_size_covers_one_glyph_plus_margin_per_scale() {
+        for scale in [1, 2, 3, 4, 32] {
+            assert_eq!(
+                min_term_size(scale),
+                (12 * scale, 6 * scale + 1),
+                "scale {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_big_resize_restores_the_requested_scale_when_the_window_grows_back() {
+        // Requested 2 in a tall terminal, clamped to 1 by a short window: a
+        // resize that fits the request again brings scale 2 — and its strip
+        // width — back, phase kept.
+        let mut engine = big_scrolling("中A", 2, 200, 8); // strip 36
+        let before = engine.cycle();
+        for _ in 0..before / 4 {
+            engine.advance();
+        }
+
+        let clamp = engine.resize_big(200, 8); // max (8−1)/6 = 1
+        assert_eq!(
+            clamp,
+            ScaleClamp {
+                requested: 2,
+                applied: 1,
+                clamped: true
+            }
+        );
+        let shrunk = engine.cycle();
+        assert_eq!(engine.text_width(), 18);
+
+        let clamp = engine.resize_big(200, 40); // 2 fits 40 rows
+        assert_eq!(
+            clamp,
+            ScaleClamp {
+                requested: 2,
+                applied: 2,
+                clamped: false
+            }
+        );
+        assert_eq!(engine.text_width(), 36);
+        assert_eq!(engine.cycle(), before);
+        // The phase rule applied twice: offset × cycle at each reflow.
+        let offset_at_shrink = before / 4;
+        let offset_after_shrink = offset_at_shrink * shrunk / before;
+        assert_eq!(engine.offset(), offset_after_shrink * before / shrunk);
+        assert!(engine.offset() < engine.cycle());
+
+        // ...and a same-geometry report after the restore settles nothing.
+        let settled = engine.offset();
+        engine.resize_big(200, 40);
         assert_eq!(engine.offset(), settled);
     }
 

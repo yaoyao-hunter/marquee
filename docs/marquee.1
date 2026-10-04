@@ -78,9 +78,12 @@ width, and an edge that cuts through a glyph clips it by whole cells so the
 motion never jumps a column.
 .Pp
 .Fl scale
-is fitted to the terminal height, 6\(muN \(<= rows \(mi 1, leaving one row of
-margin: a request that does not fit is reduced and reported on standard
-error, both at startup and again on every resize.
+names the terminal it needs: at least 12\(muN columns (one whole glyph) by
+6\(muN+1 rows (the glyph rows plus one line of margin). A terminal smaller
+than that is refused before the first frame; one that shrinks below it
+mid-run is reported once on standard error while the scroll carries on.
+See
+.Sx TERMINAL BEHAVIOUR .
 .Pp
 Like the single line, no alternate screen is entered and a frame is one
 buffered write; on every way out \(em the cycles ran out, Ctrl+C, an I/O
@@ -182,8 +185,8 @@ Pixel magnification for
 .Fl big :
 1 to 32, default 1.
 The text then spans 6\(muN terminal rows.
-A request that does not fit the terminal height is clamped to
-6\(muN \(<= rows \(mi 1 and reported on standard error.
+The terminal must be at least 12\(muN columns by 6\(muN+1 rows; anything
+smaller is refused before the first frame (exit 2).
 Requires
 .Fl big .
 .It Fl font Ar name
@@ -210,7 +213,10 @@ It is read as input in raw mode, exits 0, and leaves the terminal restored.
 A resize is observed while running, not only at startup: the very next frame is
 drawn at the new width, with the text kept at the same point of its trip.
 In big-font mode the scale is re-fitted to the new height for the same frame,
-with a notice on standard error when it had to shrink.
+down when the window shrinks and back toward the request when it grows again.
+A window that shrinks below the big-font size limits never stops the scroll:
+the run degrades and one notice naming the size it needs goes to standard
+error.
 A zero-width report (a window that is hidden or still being laid out) is
 ignored in favour of the last real width.
 .It Redirected output
@@ -235,8 +241,8 @@ redirected output went away.
 .It 1
 Drawing failed: a real I/O error.
 .It 2
-Usage: no text, blank text, or a bad flag (the command-line parser's own error
-code).
+Usage: no text, blank text, a bad flag (the command-line parser's own error
+code), or a terminal smaller than big-font mode needs.
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width 10n

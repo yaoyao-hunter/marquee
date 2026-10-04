@@ -134,7 +134,8 @@ pub struct Cli {
     #[arg(long)]
     big: bool,
 
-    /// Pixel magnification for --big: 1-32; clamped to the terminal height
+    /// Pixel magnification for --big: 1-32; the terminal must be at least
+    /// 12·N columns and 6·N+1 rows, or the run is refused
     #[arg(
         long,
         value_name = "N",
