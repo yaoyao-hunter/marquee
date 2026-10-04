@@ -55,6 +55,15 @@ pub enum Align {
     Right,
 }
 
+/// Which packaged pixel-font atlas `--big` renders with. One variant today;
+/// `ja`/`zh-hant` are planned once their atlases are generated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Font {
+    /// Simplified Chinese, ASCII and a tofu fallback (the packaged atlas)
+    #[value(name = "zh-hans")]
+    ZhHans,
+}
+
 /// The parsed command line.
 ///
 /// Accessors are the contract for the engine (T-5), the renderer (T-6) and
@@ -119,6 +128,25 @@ pub struct Cli {
     /// Scroll exactly one cycle, then exit (same as --repeat 1)
     #[arg(long, conflicts_with = "repeat")]
     once: bool,
+
+    /// Scroll the text as big pixel glyphs spanning several terminal rows
+    /// (fusion-pixel font, half-block cells)
+    #[arg(long)]
+    big: bool,
+
+    /// Pixel magnification for --big: 1-32; clamped to the terminal height
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..=32),
+        requires = "big",
+        default_value_t = 1
+    )]
+    scale: u32,
+
+    /// Which packaged pixel font --big renders with
+    #[arg(long, value_enum, requires = "big", default_value_t = Font::ZhHans)]
+    font: Font,
 }
 
 // Accessors consumed by T-5 (engine), T-6 (renderer) and T-7 (run loop).
@@ -175,6 +203,21 @@ impl Cli {
     /// additionally turns colour off when stdout is not a terminal.
     pub fn color_enabled(&self) -> bool {
         !self.no_color
+    }
+
+    /// Whether the text scrolls as big pixel glyphs over multiple rows.
+    pub fn big(&self) -> bool {
+        self.big
+    }
+
+    /// The `--scale` pixel magnification for big mode.
+    pub fn scale(&self) -> usize {
+        self.scale as usize
+    }
+
+    /// Which packaged pixel font big mode renders with.
+    pub fn font(&self) -> Font {
+        self.font
     }
 }
 
@@ -298,6 +341,11 @@ mod tests {
     fn every_documented_flag_parses() {
         let cli = parsed(&[
             "hello 世界",
+            "--big",
+            "--scale",
+            "3",
+            "--font",
+            "zh-hans",
             "--speed",
             "120",
             "--direction",
@@ -312,6 +360,9 @@ mod tests {
             "4",
         ]);
         assert_eq!(cli.text(), Some("hello 世界"));
+        assert!(cli.big());
+        assert_eq!(cli.scale(), 3);
+        assert_eq!(cli.font(), Font::ZhHans);
         assert_eq!(cli.direction(), Direction::Right);
         assert!(cli.bounce());
         assert_eq!(cli.gap(), 3);
@@ -334,6 +385,46 @@ mod tests {
             Duration::from_millis(DEFAULT_SPEED_MS)
         );
         assert!(cli.color_enabled());
+        assert!(!cli.big(), "big mode is opt-in");
+        assert_eq!(cli.scale(), 1, "the default magnification is 1");
+        assert_eq!(
+            cli.font(),
+            Font::ZhHans,
+            "the packaged atlas is the default"
+        );
+    }
+
+    #[test]
+    fn big_mode_flags_only_make_sense_with_big() {
+        for flag in ["--scale 2", "--font zh-hans"] {
+            let args: Vec<&str> = flag.split(' ').chain(["hi"]).collect();
+            let err = parse(&args).expect_err(&format!("{flag} needs --big"));
+            assert_eq!(
+                err.kind(),
+                ErrorKind::MissingRequiredArgument,
+                "{flag} without --big"
+            );
+            let message = err.render().to_string();
+            assert!(message.contains("--big"), "{message}");
+        }
+        // ...and with it, they parse.
+        assert_eq!(parsed(&["--big", "--scale", "2", "hi"]).scale(), 2);
+    }
+
+    #[test]
+    fn scale_is_validated_and_the_font_list_is_what_is_packaged() {
+        for bad in ["0", "33"] {
+            let err =
+                parse(&["--big", "--scale", bad, "hi"]).expect_err("--scale must be in range");
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "--scale {bad}");
+        }
+        // Only the packaged font parses; the planned variants do not, and
+        // clap's message says what is available.
+        let err = parse(&["--big", "--font", "ja", "hi"]).expect_err("no ja atlas is packaged");
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        let message = err.render().to_string();
+        assert!(message.contains("ja"), "{message}");
+        assert!(message.contains("zh-hans"), "{message}");
     }
 
     #[test]
@@ -427,6 +518,9 @@ mod tests {
                 "--align",
                 "--no-color",
                 "--once",
+                "--big",
+                "--scale",
+                "--font",
             ] {
                 assert!(
                     help.contains(documented),
