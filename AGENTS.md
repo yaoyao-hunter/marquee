@@ -47,15 +47,14 @@ main                 # product; always runnable; no normal development here
 |----------------------|----------------------------------------------|-------------|
 | `feat/marquee-core`  | v1 core CLI (unicode, cli, terminal, engine, renderer, run loop, README) | T-2..T-8 |
 | `feat/big-font-mode` | big-font mode design + implementation (docs/big-font-mode.md)            | T-9..T-12 |
-| `feat/themes-and-continuous-scroll` | theme layer (`src/theme.rs`, `--theme`/`--theme-file`) and continuous scrolling (`--continuous`); vuv cards not yet created | — |
+| `feat/readme-zh`     | Chinese main README (README.en.md kept), GIF screenshots (docs/images/, tools/vhs/), docs/themes.md; vuv cards not yet created | — |
 
 ### Integration
 
-Remote: `origin = git@github-yaoyao-hunter:yaoyao-hunter/marquee.git` (GitHub
-repo may not exist yet — pushes fail with "Repository not found" until it is
-created). While there is no remote, `feat/* → main` integration is a local
-merge performed **after** the human accepts the corresponding vuv task(s);
-once the remote exists, switch to real PRs. Never `task/* → main` directly.
+Remote: `origin = git@github-yaoyao-hunter:yaoyao-hunter/marquee.git`. The
+GitHub repo exists: `feat/* → main` integration goes through real PRs, merged
+by the human; delete the branch (local and remote) after the merge. Never
+`task/* → main` directly.
 
 ## Identity
 
