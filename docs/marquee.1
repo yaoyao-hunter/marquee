@@ -3,7 +3,7 @@
 .Os marquee 0.1.0
 .Sh NAME
 .Nm marquee
-.Nd scroll text across the terminal, one line, measured in display columns
+.Nd scroll text across the terminal, measured in display columns
 .Sh SYNOPSIS
 .Bk -words
 .Nm marquee
@@ -14,6 +14,9 @@
 .Op Fl once | Fl repeat Ar N
 .Op Fl align Ar left | center | right
 .Op Fl no-color
+.Op Fl big
+.Op Fl scale Ar N
+.Op Fl font Ar name
 .Op Fl h | Fl help
 .Op Fl V | Fl version
 .Op Ar TEXT
@@ -50,6 +53,41 @@ so the shell prompt lands on a clean line.
 .Pp
 When the terminal is resized mid-scroll, the next frame is drawn at the new
 width with the text kept at the same point of its trip.
+.Sh BIG FONT MODE
+With
+.Fl big ,
+the text is not drawn as terminal characters but as large pixel glyphs:
+each grapheme cluster maps to one glyph of the embedded Fusion Pixel Font
+(12px, Simplified Chinese coverage plus ASCII, a fallback box for anything
+missing), and each font pixel becomes an N\(muN block of terminal cells drawn
+with half-block characters when
+.Nm
+runs at
+.Fl scale Ar N .
+The glyphs span 6\(muN rows: the line the cursor is on plus the rows above
+it.
+See
+.Sx OPTIONS
+for the flags and
+.Sx TERMINAL BEHAVIOUR
+for what stays the same.
+.Pp
+The scrolling model is unchanged: one column of travel per frame, the same
+direction, bounce, gap and cycle options, a frame exactly the terminal's
+width, and an edge that cuts through a glyph clips it by whole cells so the
+motion never jumps a column.
+.Pp
+.Fl scale
+is fitted to the terminal height, 6\(muN \(<= rows \(mi 1, leaving one row of
+margin: a request that does not fit is reduced and reported on standard
+error, both at startup and again on every resize.
+.Pp
+Like the single line, no alternate screen is entered and a frame is one
+buffered write; on every way out \(em the cycles ran out, Ctrl+C, an I/O
+error, a panic \(em the rows the marquee occupied are erased and the shell's
+line comes back blank.
+.Fl align
+has no effect in big mode.
 .Sh INPUT
 .Ar TEXT
 may be given as a positional argument or piped on standard input.
@@ -134,6 +172,30 @@ Never emit colour escape sequences.
 Currently accepted but without effect, because
 .Nm
 does not emit colour yet at all.
+.It Fl big
+Scroll the text as big pixel glyphs spanning several terminal rows, rendered
+from the embedded Fusion Pixel Font with half-block characters.
+See
+.Sx BIG FONT MODE .
+.It Fl scale Ar N
+Pixel magnification for
+.Fl big :
+1 to 32, default 1.
+The text then spans 6\(muN terminal rows.
+A request that does not fit the terminal height is clamped to
+6\(muN \(<= rows \(mi 1 and reported on standard error.
+Requires
+.Fl big .
+.It Fl font Ar name
+Which packaged pixel font
+.Fl big
+renders with:
+.Cm zh-hans
+(default) is the Simplified Chinese atlas.
+Other variants are planned but not packaged yet, and naming one is a usage
+error.
+Requires
+.Fl big .
 .It Fl h , Fl help
 Print help; the long form prints every option in full.
 .It Fl V , Fl version
@@ -147,11 +209,14 @@ It is read as input in raw mode, exits 0, and leaves the terminal restored.
 .It Resize
 A resize is observed while running, not only at startup: the very next frame is
 drawn at the new width, with the text kept at the same point of its trip.
+In big-font mode the scale is re-fitted to the new height for the same frame,
+with a notice on standard error when it had to shrink.
 A zero-width report (a window that is hidden or still being laid out) is
 ignored in favour of the last real width.
 .It Redirected output
 When standard output is not a terminal, each frame is written as one plain
 line: no cursor positioning, no escape bytes.
+In big-font mode a frame is 6\(muN such lines, one per cell row.
 The frames are paced as usual.
 When the reader of the pipe goes away (piping
 .Nm
@@ -208,6 +273,11 @@ Scroll text from a pipe; a positional argument would win over it:
 .Bd -literal -offset indent
 $ echo \(dq正在部署...\(dq | marquee
 $ git log --oneline -1 | marquee --speed 30
+.Ed
+.Pp
+Big pixel glyphs at double size, spanning twelve rows:
+.Bd -literal -offset indent
+$ marquee \(dq你好世界\(dq --big --scale 2
 .Ed
 .Pp
 Redirected output is one plain line per frame, with no escape bytes:
