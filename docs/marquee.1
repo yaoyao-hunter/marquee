@@ -1,0 +1,310 @@
+.Dd October 4, 2026
+.Dt MARQUEE 1
+.Os marquee 0.1.0
+.Sh NAME
+.Nm marquee
+.Nd scroll text across the terminal, measured in display columns
+.Sh SYNOPSIS
+.Bk -words
+.Nm marquee
+.Op Fl bounce
+.Op Fl direction Ar left | right
+.Op Fl gap Ar COLUMNS
+.Op Fl speed Ar MS | Fl fps Ar FPS
+.Op Fl once | Fl repeat Ar N
+.Op Fl align Ar left | center | right
+.Op Fl no-color
+.Op Fl big
+.Op Fl scale Ar N
+.Op Fl font Ar name
+.Op Fl h | Fl help
+.Op Fl V | Fl version
+.Op Ar TEXT
+.Ek
+.Sh DESCRIPTION
+.Nm
+scrolls
+.Ar TEXT
+across the terminal on the single line the cursor is on: the text enters at one
+edge, travels one display column per frame, leaves at the other edge, and
+starts again after
+.Fl gap
+blank columns.
+It loops forever until it has run the cycles it was asked for or it is stopped
+with Ctrl+C.
+.Pp
+Widths are counted the way terminals count them:
+CJK characters occupy 2 columns,
+emoji occupy 2,
+combining marks occupy 0,
+and a family joined by zero-width joiners is one unit of 2 columns.
+Text is segmented into grapheme clusters, never into code points, and a cluster
+that would straddle the edge of a frame is dropped for that frame rather than
+split \(em a terminal cannot draw half a character.
+Every frame is exactly the terminal's width in columns, so nothing shifts and
+nothing wraps.
+.Pp
+.Nm
+takes over the current line only: the cursor is hidden, no alternate screen is
+entered, and the scrollback is left intact.
+On every way out \(em the cycles ran out, Ctrl+C, an I/O error, even a panic
+\(em the line is erased, the cursor is shown again and raw mode is left behind,
+so the shell prompt lands on a clean line.
+.Pp
+When the terminal is resized mid-scroll, the next frame is drawn at the new
+width with the text kept at the same point of its trip.
+.Sh BIG FONT MODE
+With
+.Fl big ,
+the text is not drawn as terminal characters but as large pixel glyphs:
+each grapheme cluster maps to one glyph of the embedded Fusion Pixel Font
+(12px, Simplified Chinese coverage plus ASCII, a fallback box for anything
+missing), and each font pixel becomes an N\(muN block of terminal cells drawn
+with half-block characters when
+.Nm
+runs at
+.Fl scale Ar N .
+The glyphs span 6\(muN rows: the line the cursor is on plus the rows above
+it.
+See
+.Sx OPTIONS
+for the flags and
+.Sx TERMINAL BEHAVIOUR
+for what stays the same.
+.Pp
+The scrolling model is unchanged: one column of travel per frame, the same
+direction, bounce, gap and cycle options, a frame exactly the terminal's
+width, and an edge that cuts through a glyph clips it by whole cells so the
+motion never jumps a column.
+.Pp
+.Fl scale
+is fitted to the terminal height, 6\(muN \(<= rows \(mi 1, leaving one row of
+margin: a request that does not fit is reduced and reported on standard
+error, both at startup and again on every resize.
+.Pp
+Like the single line, no alternate screen is entered and a frame is one
+buffered write; on every way out \(em the cycles ran out, Ctrl+C, an I/O
+error, a panic \(em the rows the marquee occupied are erased and the shell's
+line comes back blank.
+.Fl align
+has no effect in big mode.
+.Sh INPUT
+.Ar TEXT
+may be given as a positional argument or piped on standard input.
+When both are possible the rule is, in order:
+.Bl -enum -compact
+.It
+A positional
+.Ar TEXT
+wins, and standard input is never read.
+.It
+With no
+.Ar TEXT ,
+piped standard input is read to EOF: each line is trimmed, blank lines are
+dropped, and the rest are joined with a single space, because a marquee scrolls
+one line.
+.It
+With no
+.Ar TEXT
+and a terminal on standard input,
+.Nm
+refuses to block waiting for you to type: it exits 2 with a message instead.
+.El
+.Pp
+Blank input is refused either way (exit 2), since there would be nothing to
+scroll.
+.Sh OPTIONS
+.Bl -tag -width 14n
+.It Ar TEXT
+The text to scroll.
+If omitted, standard input is read according to the rule above.
+.It Fl speed Ar MS
+Milliseconds per column step: 1 to 10000.
+Default 50, i.e. 20 column steps per second.
+Cannot be combined with
+.Fl fps .
+.It Fl fps Ar FPS
+Frames per second: 1 to 1000, where one frame is one column step.
+Cannot be combined with
+.Fl speed .
+When neither is given the default of one step every 50 ms applies.
+.It Fl direction Ar direction
+Which edge the text enters from:
+.Cm left
+(default) enters at the right edge and leaves at the left, the classic marquee;
+.Cm right
+mirrors it.
+.It Fl bounce
+Reverse at both edges instead of wrapping around to re-enter.
+A bounce cycle is the trip to one edge, the gap, the trip back, and the gap
+again.
+.It Fl gap Ar COLUMNS
+Blank columns between the end of one cycle and the start of the next.
+Default 8.
+.It Fl once
+Scroll exactly one cycle, then exit with status 0.
+The same as
+.Fl repeat Ar 1 .
+Cannot be combined with
+.Fl repeat .
+.It Fl repeat Ar N
+Scroll exactly
+.Ar N
+cycles (N \(>= 1), then exit with status 0.
+Cannot be combined with
+.Fl once .
+.It Fl align Ar alignment
+Where text shorter than the terminal would sit while it is on screen:
+.Cm left ,
+.Cm center
+or
+.Cm right ,
+default
+.Cm left .
+.Pp
+Currently accepted and validated but
+.Em not implemented :
+text scrolls from the edge as usual, regardless of this flag.
+It is reserved for a static placement mode.
+.It Fl no-color
+Never emit colour escape sequences.
+.Pp
+Currently accepted but without effect, because
+.Nm
+does not emit colour yet at all.
+.It Fl big
+Scroll the text as big pixel glyphs spanning several terminal rows, rendered
+from the embedded Fusion Pixel Font with half-block characters.
+See
+.Sx BIG FONT MODE .
+.It Fl scale Ar N
+Pixel magnification for
+.Fl big :
+1 to 32, default 1.
+The text then spans 6\(muN terminal rows.
+A request that does not fit the terminal height is clamped to
+6\(muN \(<= rows \(mi 1 and reported on standard error.
+Requires
+.Fl big .
+.It Fl font Ar name
+Which packaged pixel font
+.Fl big
+renders with:
+.Cm zh-hans
+(default) is the Simplified Chinese atlas.
+Other variants are planned but not packaged yet, and naming one is a usage
+error.
+Requires
+.Fl big .
+.It Fl h , Fl help
+Print help; the long form prints every option in full.
+.It Fl V , Fl version
+Print version and exit.
+.El
+.Sh TERMINAL BEHAVIOUR
+.Bl -tag -width 10n
+.It Ctrl+C
+The only way to stop an unbounded scroll.
+It is read as input in raw mode, exits 0, and leaves the terminal restored.
+.It Resize
+A resize is observed while running, not only at startup: the very next frame is
+drawn at the new width, with the text kept at the same point of its trip.
+In big-font mode the scale is re-fitted to the new height for the same frame,
+with a notice on standard error when it had to shrink.
+A zero-width report (a window that is hidden or still being laid out) is
+ignored in favour of the last real width.
+.It Redirected output
+When standard output is not a terminal, each frame is written as one plain
+line: no cursor positioning, no escape bytes.
+In big-font mode a frame is 6\(muN such lines, one per cell row.
+The frames are paced as usual.
+When the reader of the pipe goes away (piping
+.Nm
+into
+.Xr head 1 ,
+for example),
+.Nm
+exits 0 in silence rather than reporting a broken pipe.
+.El
+.Sh EXIT STATUS
+.Ex -std marquee
+.Bl -tag -width 5n
+.It 0
+The cycles ran out, the scroll was stopped with Ctrl+C, or the reader of
+redirected output went away.
+.It 1
+Drawing failed: a real I/O error.
+.It 2
+Usage: no text, blank text, or a bad flag (the command-line parser's own error
+code).
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width 10n
+.It Ev COLUMNS
+The width assumed when standard output is not a terminal (pipe, file, CI) and
+this holds a sane positive number.
+Otherwise 80.
+.It Ev LINES
+The height assumed in the same situation.
+Otherwise 24.
+.El
+.Sh EXAMPLES
+Scroll a mixed CJK and emoji string at the default speed:
+.Bd -literal -offset indent
+$ marquee \(dq你好世界 · Hello Terminal 🚀\(dq
+.Ed
+.Pp
+One cycle, slower (120 ms per column), then exit:
+.Bd -literal -offset indent
+$ marquee --speed 120 --once \(dq deploying... \(dq
+.Ed
+.Pp
+30 frames per second, entering from the left edge:
+.Bd -literal -offset indent
+$ marquee --fps 30 --direction right \(dq slow news day \(dq
+.Ed
+.Pp
+Bounce between the edges, a small gap, exactly three cycles:
+.Bd -literal -offset indent
+$ marquee --bounce --gap 2 --repeat 3 \(dq ping \(dq
+.Ed
+.Pp
+Scroll text from a pipe; a positional argument would win over it:
+.Bd -literal -offset indent
+$ echo \(dq正在部署...\(dq | marquee
+$ git log --oneline -1 | marquee --speed 30
+.Ed
+.Pp
+Big pixel glyphs at double size, spanning twelve rows:
+.Bd -literal -offset indent
+$ marquee \(dq你好世界\(dq --big --scale 2
+.Ed
+.Pp
+Redirected output is one plain line per frame, with no escape bytes:
+.Bd -literal -offset indent
+$ marquee --once \(dq hi \(dq > frames.txt
+.Ed
+.Sh KNOWN GAPS
+.Bl -bullet
+.It
+.Fl align
+is accepted and validated but has no effect yet (see
+.Sx OPTIONS ) .
+.It
+.Fl no-color
+is accepted but has no effect, because no colour is emitted yet.
+.El
+.Sh SEE ALSO
+.Xr head 1 ,
+.Xr tmux 1 ,
+.Xr terminfo 5
+.Pp
+The project README covers the same ground with a demo:
+.Lk https://github.com/yaoyao-hunter/marquee
+.Sh AUTHORS
+.An yaoyao-hunter Aq Mt 32746788+yaoyao-hunter@users.noreply.github.com
+.Sh LICENSE
+MIT.
+See the
+.Pa LICENSE
+file in the distribution.
