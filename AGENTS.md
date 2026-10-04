@@ -12,52 +12,31 @@ cargo test
 cargo run -- "你好世界 · Hello Terminal 🚀"   # manual smoke
 ```
 
-All three gates must pass before any task card goes to Review. No unnecessary
+All three gates must pass before any change goes to review. No unnecessary
 `unsafe`.
 
-## Work board
+## Workflow
 
-Work is tracked in the vuv vault `bip` (build-in-public), project **P-1
-(marquee)**. Follow the vuv work loop: `next_ready` → `claim` → Doing → work →
-tick checklist → Review. Agents never move tasks to Done; a human accepts.
-Design docs live in `docs/`.
-
-## Git conventions (w-git-branch-hygiene)
-
-Hierarchy — depth never exceeds 2:
-
-```
-main                 # product; always runnable; no normal development here
-├── feat/*           # one coherent outcome → one final PR
-│   └── task/*       # temporary parallel subwork; merges into its feat/*
-└── fix/*            # independent bug fix → PR
-```
-
+- `main` stays runnable; no normal development happens directly on it.
+- Work on a `feat/*` branch (one coherent outcome → one final PR) or a `fix/*`
+  branch (an independent bug fix → PR). Parallel subwork may use short-lived
+  `task/*` branches that merge into their `feat/*` and are then deleted.
 - Name branches by purpose, never by executor (`feat/marquee-core`, not
   `claude-task`).
-- Work directly on the `feat/*` branch unless work is genuinely parallel;
-  create `task/*` only then, and delete it after local merge into `feat/*`.
-- Delete branches after integration; keep worktrees 1:1 with branches.
-- Commits: Conventional Commits, referencing the vuv task id, e.g.
-  `feat(unicode): precompute grapheme cells with display widths (T-2)`.
+- Integration: `feat/* → main` through pull requests on GitHub, merged by the
+  maintainer. Delete the branch (local and remote) after the merge. Never
+  open `task/* → main` PRs.
+- Push to `origin` exactly as configured; do not change remotes or push
+  under any other identity.
+- Commits follow Conventional Commits, e.g.
+  `feat(unicode): precompute grapheme cells with display widths`.
 
-### Current branch map
+## Docs
 
-| Branch               | Scope                                        | vuv tasks   |
-|----------------------|----------------------------------------------|-------------|
-| `feat/marquee-core`  | v1 core CLI (unicode, cli, terminal, engine, renderer, run loop, README) | T-2..T-8 |
-| `feat/big-font-mode` | big-font mode design + implementation (docs/big-font-mode.md)            | T-9..T-12 |
-| `feat/readme-zh`     | Chinese main README (README.en.md kept), GIF screenshots (docs/images/, tools/vhs/), docs/themes.md; vuv cards not yet created | — |
-
-### Integration
-
-Remote: `origin = git@github-yaoyao-hunter:yaoyao-hunter/marquee.git`. The
-GitHub repo exists: `feat/* → main` integration goes through real PRs, merged
-by the human; delete the branch (local and remote) after the merge. Never
-`task/* → main` directly.
-
-## Identity
-
-Repo-local git identity: `yaoyao-hunter <3969483291@qq.com>`. Push identity:
-SSH alias `github-yaoyao-hunter` (key `~/.ssh/id_ed25519_yaoyao_hunter`).
-Do not push under any other alias without being asked.
+- `docs/marquee.1` — the manual page (flags, exit codes, environment)
+- `docs/manual.md` + `docs/manual.zh-CN.md` — the big-font mode manual
+- `docs/themes.md` — the theme catalogue
+- `docs/big-font-mode.md` — the big-font design doc
+- Screenshots are GIFs in `docs/images/`, recorded with
+  [vhs](https://github.com/charmbracelet/vhs) from the tapes in `tools/vhs/`:
+  `cd docs/images && vhs ../../tools/vhs/<name>.tape`

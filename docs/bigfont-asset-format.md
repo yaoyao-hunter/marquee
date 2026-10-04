@@ -1,7 +1,7 @@
 # Bigfont asset format (v1)
 
 `assets/bigfont-12px-<variant>.bin` is the compact glyph atlas that big-font
-mode embeds with `include_bytes!` (consumer: T-10, `src/bigfont/asset.rs`).
+mode embeds with `include_bytes!` (`src/bigfont/asset.rs`).
 It is generated at development time from the official
 [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) BDF release
 by [`tools/gen-bigfont`](../tools/gen-bigfont) and committed to the repo, so
