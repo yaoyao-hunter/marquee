@@ -24,6 +24,18 @@
 //! skips or repeats a visible column — including at a bounce turnaround, where
 //! only the off-screen dwell repeats.
 //!
+//! # Continuous motion
+//!
+//! With `continuous` set (the `--continuous` flag), the next copy of the text
+//! does not wait for the previous one to leave: copies follow one another
+//! `gap` columns apart, so the screen never goes blank once the first copy
+//! has entered. The stream is the text plus its gap, repeated — one cycle is
+//! one *period* of it, `text_width + gap`, and a cycle is how
+//! `--once`/`--repeat` count. The offset never wraps (it is the total travel
+//! since the start, and cycles completed are derived from it), so there is no
+//! seam to hide; the first frame is still blank, with copy zero just off the
+//! edge, exactly like the classic motion.
+//!
 //! # Resize
 //!
 //! [`Engine::resize`] keeps the phase by column ratio, `offset' = offset *
@@ -77,6 +89,10 @@ pub struct Motion {
     pub direction: Direction,
     /// Reverse at both edges instead of starting over.
     pub bounce: bool,
+    /// The next copy follows the previous one instead of waiting for it to
+    /// leave; see the module documentation. Ignored when `bounce` is set,
+    /// because the CLI refuses the combination.
+    pub continuous: bool,
     /// Blank columns between one cycle and the next.
     pub gap: usize,
     /// How many cycles to run; `None` loops forever.
@@ -228,7 +244,9 @@ pub struct Engine {
     strip: StripKind,
     width: usize,
     motion: Motion,
-    /// Columns travelled in the current cycle; always less than [`Engine::cycle`].
+    /// Columns travelled since the start: less than [`Engine::cycle`] in the
+    /// classic motions (it wraps), the total travel in continuous mode
+    /// (it never wraps).
     offset: usize,
     completed: u32,
 }
@@ -284,12 +302,19 @@ impl Engine {
         let travel = self.width + self.strip.text_width();
         let cycle = if self.motion.bounce {
             2 * (travel + self.motion.gap)
+        } else if self.tiling() {
+            self.strip.text_width() + self.motion.gap
         } else {
             travel + self.motion.gap
         };
         // Even an empty text in a zero-width terminal has a cycle, so that
         // advancing and counting cycles stay well defined.
         cycle.max(1)
+    }
+
+    /// Whether the stream of copies is being tiled through the viewport.
+    fn tiling(&self) -> bool {
+        self.motion.continuous && !self.motion.bounce
     }
 
     /// Columns travelled so far in the current cycle.
@@ -312,16 +337,27 @@ impl Engine {
 
     /// Moves the text one column further along its trip, closing and counting
     /// the cycle when the trip is over. Does nothing once finished.
+    ///
+    /// Continuous motion never closes a cycle: the offset grows without
+    /// wrapping and the cycles completed are derived from it.
     pub fn advance(&mut self) {
         if self.is_finished() {
             return;
         }
         self.offset += 1;
-        let cycle = self.cycle();
-        if self.offset >= cycle {
-            self.offset -= cycle;
+        if self.tiling() {
+            self.sync_completed();
+        } else if self.offset >= self.cycle() {
+            self.offset -= self.cycle();
             self.completed += 1;
         }
+    }
+
+    /// Recomputes the cycles a continuous stream has completed from the
+    /// offset: one period per pass of the repeating unit.
+    fn sync_completed(&mut self) {
+        let periods = self.offset / self.cycle();
+        self.completed = u32::try_from(periods).unwrap_or(u32::MAX);
     }
 
     /// Adapts to a viewport now `width` columns wide, keeping the text at the
@@ -359,19 +395,33 @@ impl Engine {
 
     /// Applies `mutate`, then keeps the scroll phase by column ratio across
     /// the cycle change (the rule `Engine::resize` has always used).
+    ///
+    /// Continuous motion keeps its phase the same way, but without the clamp:
+    /// its offset legitimately runs past a cycle (it never wraps), so being
+    /// dropped back below one would jump the stream.
     fn reflow(&mut self, mutate: impl FnOnce(&mut Self)) {
         let previous = u64::try_from(self.cycle()).unwrap_or(1).max(1);
         mutate(self);
         let current = u64::try_from(self.cycle()).unwrap_or(1).max(1);
         let offset = u64::try_from(self.offset).unwrap_or(u64::MAX);
         let scaled = offset.saturating_mul(current) / previous;
-        // The ratio already lands below `current`; the clamp states the
-        // invariant "never stranded beyond the end of a cycle" explicitly.
-        self.offset = usize::try_from(scaled.min(current - 1)).unwrap_or(0);
+        if self.tiling() {
+            self.offset = usize::try_from(scaled).unwrap_or(usize::MAX);
+            self.sync_completed();
+        } else {
+            // The ratio already lands below `current`; the clamp states the
+            // invariant "never stranded beyond the end of a cycle" explicitly.
+            self.offset = usize::try_from(scaled.min(current - 1)).unwrap_or(0);
+        }
     }
 
     /// Writes the current frame to `out`: exactly [`Engine::width`] display
     /// columns, whole grapheme clusters only.
+    ///
+    /// In continuous mode the frame is the stream of copies: each copy of
+    /// the text, `gap` columns behind the previous one, entering and leaving
+    /// without ever letting the screen go blank (once the first copy has
+    /// entered and while `gap` is narrower than the viewport).
     ///
     /// `out` is a parameter so the renderer can hand over one reused buffer
     /// and a steady-state frame allocates nothing.
@@ -392,50 +442,23 @@ impl Engine {
             return;
         };
 
-        // Screen column of the text's first column; it may be off-screen.
-        let mut column = self.text_start();
         // Screen columns filled so far, so the frame comes out exactly `width`.
         let mut filled = 0i64;
-
-        for cell in prepared.cells() {
-            let cell_width = cell.width() as i64;
-
-            // A zero-width cluster takes no column: keep it only where it
-            // would have stood, had that been on screen.
-            if cell_width == 0 {
-                if column >= filled && column < limit {
-                    blank(out, column - filled);
-                    filled = column;
-                    out.push_str(cell.text());
+        if self.tiling() {
+            // The copies of the stream in left-to-right screen order, one
+            // period apart; the loop stops at the right edge because a
+            // copy that hit it means every later copy is off-screen too.
+            let period = self.cycle() as i64;
+            let (mut base, last) = self.copy_range();
+            while base <= last && base < limit {
+                if draw_copy(prepared, base, limit, out, &mut filled) {
+                    break;
                 }
-                continue;
+                base += period;
             }
-
-            if column + cell_width <= 0 {
-                // Entirely off the left edge.
-                column += cell_width;
-                continue;
-            }
-            if column >= limit {
-                // Entirely off the right edge, and so is everything after it.
-                break;
-            }
-
-            let from = column.max(filled);
-            blank(out, from - filled);
-
-            let to = (column + cell_width).min(limit);
-            if column >= 0 && column + cell_width <= limit {
-                out.push_str(cell.text());
-            } else {
-                // Straddles an edge: a cluster is never split, so the columns
-                // it covers on screen stay blank.
-                blank(out, to - from);
-            }
-            filled = to;
-            column += cell_width;
+        } else {
+            draw_copy(prepared, self.text_start(), limit, out, &mut filled);
         }
-
         blank(out, limit - filled);
     }
 
@@ -448,6 +471,8 @@ impl Engine {
     /// clip arithmetic guarantees `screen_col − clip_left` equals the glyph's
     /// (possibly negative) screen start, and one [`Engine::advance`] shifts
     /// every clip by exactly one column — no column jumps between frames.
+    /// In continuous mode the slices cover every copy of the stream on
+    /// screen, in left-to-right order, with the same guarantees.
     pub fn visible_glyphs(&self, out: &mut Vec<BigGlyphSlice>) {
         out.clear();
         let StripKind::Big(strip) = &self.strip else {
@@ -458,37 +483,51 @@ impl Engine {
             return;
         }
 
-        let start = self.text_start();
         let scale = strip.scale();
-        // Strip column of the glyph currently being examined.
-        let mut strip_col: i64 = 0;
-        for glyph in strip.glyphs() {
-            let advance = cell_cols(glyph.width_px(), scale) as i64;
-            // Screen span of this glyph: [glyph_start, glyph_end).
-            let glyph_start = start + strip_col;
-            let glyph_end = glyph_start + advance;
+        // Where the copies of the strip start, left to right: one period
+        // apart in continuous mode, a lone strip otherwise.
+        let (mut base, last) = if self.tiling() {
+            self.copy_range()
+        } else {
+            let start = self.text_start();
+            (start, start)
+        };
+        'copies: while base <= last && base < limit {
+            // Strip column of the glyph currently being examined.
+            let mut strip_col: i64 = 0;
+            for glyph in strip.glyphs() {
+                let advance = cell_cols(glyph.width_px(), scale) as i64;
+                // Screen span of this glyph: [glyph_start, glyph_end).
+                let glyph_start = base + strip_col;
+                let glyph_end = glyph_start + advance;
 
-            if glyph_end <= 0 {
-                // Entirely off the left edge.
+                if glyph_end <= 0 {
+                    // Entirely off the left edge.
+                    strip_col += advance;
+                    continue;
+                }
+                if glyph_start >= limit {
+                    // Entirely off the right edge, and so is everything
+                    // after it — in this copy and any copy further right.
+                    break 'copies;
+                }
+
+                // The span intersects the viewport: clip by whole columns.
+                let clip_left = (-glyph_start).max(0) as usize;
+                let clip_right = (glyph_end - limit).max(0) as usize;
+                out.push(BigGlyphSlice {
+                    glyph: *glyph,
+                    clip_left,
+                    clip_right,
+                    screen_col: glyph_start.max(0) as usize,
+                    scale,
+                });
                 strip_col += advance;
-                continue;
             }
-            if glyph_start >= limit {
-                // Entirely off the right edge, and so is everything after it.
+            if !self.tiling() {
                 break;
             }
-
-            // The span intersects the viewport: clip by whole columns.
-            let clip_left = (-glyph_start).max(0) as usize;
-            let clip_right = (glyph_end - limit).max(0) as usize;
-            out.push(BigGlyphSlice {
-                glyph: *glyph,
-                clip_left,
-                clip_right,
-                screen_col: glyph_start.max(0) as usize,
-                scale,
-            });
-            strip_col += advance;
+            base += self.cycle() as i64;
         }
     }
 
@@ -523,6 +562,100 @@ impl Engine {
             (Direction::Left, true) | (Direction::Right, false) => moved - text_width,
         }
     }
+
+    /// The first and last screen column at which the on-screen copies of a
+    /// continuous stream start, in left-to-right order. The bases between
+    /// them, one period apart, are the copies to draw; `i64::MAX` as the
+    /// last bound means "until the viewport's right edge says stop".
+    fn copy_range(&self) -> (i64, i64) {
+        let period = self.cycle() as i64;
+        let text_width = self.strip.text_width() as i64;
+        let offset = self.offset as i64;
+
+        match self.motion.direction {
+            // Copies pile up to the right of copy zero, which started just
+            // off the right edge: the leftmost copy on screen is the first
+            // whose right edge has crossed column zero.
+            Direction::Left => {
+                let width = self.width as i64;
+                let first = width - offset;
+                // Copies entirely off the left edge are skipped outright, so
+                // a long-running stream still draws only what is visible.
+                let beyond = offset - width - text_width + 1;
+                let skip = if beyond <= 0 {
+                    0
+                } else {
+                    (beyond + period - 1) / period
+                };
+                (first + skip * period, i64::MAX)
+            }
+            // Copies trail to the left of copy zero, which started just off
+            // the left edge; `newest` is the copy that has most recently
+            // begun entering, and the bases ascend to copy zero itself.
+            Direction::Right => {
+                let newest = (offset + period - 1) / period - 1;
+                if newest < 0 {
+                    return (1, 0);
+                }
+                (offset - text_width - newest * period, offset - text_width)
+            }
+        }
+    }
+}
+
+/// Draws one copy of `prepared` with its first column at screen column
+/// `base`, tracking how much of the viewport is filled so that consecutive
+/// copies keep exactly the `gap` between them. Returns whether the copy ran
+/// into the right edge — in which case nothing further right, in this copy
+/// or any copy after it, can be on screen.
+fn draw_copy(
+    prepared: &PreparedText,
+    base: i64,
+    limit: i64,
+    out: &mut String,
+    filled: &mut i64,
+) -> bool {
+    // Screen column of the cell being drawn; it may be off-screen.
+    let mut column = base;
+    for cell in prepared.cells() {
+        let cell_width = cell.width() as i64;
+
+        // A zero-width cluster takes no column: keep it only where it
+        // would have stood, had that been on screen.
+        if cell_width == 0 {
+            if column >= *filled && column < limit {
+                blank(out, column - *filled);
+                *filled = column;
+                out.push_str(cell.text());
+            }
+            continue;
+        }
+
+        if column + cell_width <= 0 {
+            // Entirely off the left edge.
+            column += cell_width;
+            continue;
+        }
+        if column >= limit {
+            // Entirely off the right edge, and so is everything after it.
+            return true;
+        }
+
+        let from = column.max(*filled);
+        blank(out, from - *filled);
+
+        let to = (column + cell_width).min(limit);
+        if column >= 0 && column + cell_width <= limit {
+            out.push_str(cell.text());
+        } else {
+            // Straddles an edge: a cluster is never split, so the columns
+            // it covers on screen stay blank.
+            blank(out, to - from);
+        }
+        *filled = to;
+        column += cell_width;
+    }
+    false
 }
 
 /// Appends `columns` spaces.
@@ -544,6 +677,17 @@ mod tests {
         Motion {
             direction,
             bounce,
+            continuous: false,
+            gap,
+            cycles: None,
+        }
+    }
+
+    fn continuous(direction: Direction, gap: usize) -> Motion {
+        Motion {
+            direction,
+            bounce: false,
+            continuous: true,
             gap,
             cycles: None,
         }
@@ -551,6 +695,10 @@ mod tests {
 
     fn scrolling(text: &str, width: usize, gap: usize) -> Engine {
         Engine::new(prepare(text), width, motion(Direction::Left, false, gap))
+    }
+
+    fn scrolling_continuously(text: &str, width: usize, gap: usize) -> Engine {
+        Engine::new(prepare(text), width, continuous(Direction::Left, gap))
     }
 
     /// Every frame of one cycle, in order, by walking [`Engine::advance`].
@@ -721,6 +869,198 @@ mod tests {
                 "    a", "   ab", "  abc", " abc ", "abc  ", "bc   ", "c    ", "     ",
             ]
         );
+    }
+
+    // ---- continuous motion (--continuous) ----
+
+    #[test]
+    fn continuous_scrolling_follows_itself_without_a_blank_gap() {
+        // "abc" (3) with gap 2: one period is 5 columns, and a period is a
+        // cycle. The frames of the first two cycles, in order:
+        let mut engine = scrolling_continuously("abc", 5, 2);
+        assert_eq!(engine.cycle(), 3 + 2, "a cycle is one period of the stream");
+
+        let mut frame = String::new();
+        let mut frames = Vec::new();
+        for _ in 0..2 * engine.cycle() {
+            engine.draw(&mut frame);
+            frames.push(frame.clone());
+            engine.advance();
+        }
+        assert_eq!(
+            frames,
+            vec![
+                // cycle 1: the classic single pass…
+                "     ", "    a", "   ab", "  abc", " abc ",
+                // …except the moment copy zero's tail nears the left edge,
+                // copy one is already entering from the right.
+                "abc  ", "bc  a", "c  ab", "  abc", " abc ",
+            ]
+        );
+        // The stream is periodic: the frame at offset 2p is the frame at
+        // offset p, and so it goes forever — no seam, ever.
+        engine.draw(&mut frame);
+        let at_two_periods = frame.clone();
+        let mut restarted = scrolling_continuously("abc", 5, 2);
+        for _ in 0..5 {
+            restarted.advance();
+        }
+        restarted.draw(&mut frame);
+        assert_eq!(frame, at_two_periods, "offset 2p draws as offset p");
+    }
+
+    #[test]
+    fn continuous_right_scroll_mirrors_continuous_left_scroll() {
+        // Mirroring a right scroll gives the left scroll of the same text
+        // reversed, frame for frame — the tiling mirrors like the classic
+        // motion does.
+        let mut rightward = Engine::new(prepare("abc"), 5, continuous(Direction::Right, 2));
+        let mut reversed = scrolling_continuously("cba", 5, 2);
+
+        for offset in 0..3 * rightward.cycle() {
+            let right = frame_at(&mut rightward, offset);
+            let mirrored: String = right.graphemes(true).rev().collect();
+            assert_eq!(mirrored, frame_at(&mut reversed, offset), "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn a_continuous_cycle_is_one_period_of_the_stream() {
+        // --repeat n bounds the run in periods: n passes of the repeating
+        // unit past any fixed column.
+        let mut engine = Engine::new(
+            prepare("abc"),
+            5,
+            Motion {
+                cycles: Some(3),
+                ..continuous(Direction::Left, 2)
+            },
+        );
+        let period = engine.cycle();
+        for step in 0..3 * period {
+            assert!(!engine.is_finished(), "finished early at step {step}");
+            engine.advance();
+        }
+        assert!(engine.is_finished());
+        assert_eq!(engine.completed_cycles(), 3);
+
+        // No bound: the offset never wraps and cycles are derived from it.
+        let mut engine = scrolling_continuously("abc", 5, 2);
+        for _ in 0..10 * period + 4 {
+            engine.advance();
+        }
+        assert_eq!(engine.offset(), 10 * period + 4, "continuous never wraps");
+        assert_eq!(engine.completed_cycles(), 10);
+        let settled = engine.offset();
+        engine.advance();
+        engine.advance();
+        assert_eq!(
+            engine.offset(),
+            settled + 2,
+            "an unbounded stream keeps moving"
+        );
+    }
+
+    #[test]
+    fn continuous_frames_are_the_width_in_whole_clusters_for_every_geometry() {
+        let text = "你好🚀ab e\u{301}";
+        let prepared = prepare(text);
+        let whole: Vec<&str> = prepared.cells().iter().map(|cell| cell.text()).collect();
+
+        for width in [1, 2, 3, 5, 8, 13, 40] {
+            for direction in [Direction::Left, Direction::Right] {
+                for gap in [0, 2, 30] {
+                    let mut engine = Engine::new(prepare(text), width, continuous(direction, gap));
+                    // Two full periods and the startup transient both show
+                    // up in the frames of three cycles.
+                    let period = engine.cycle();
+                    for offset in 0..3 * period {
+                        engine.offset = offset;
+                        let mut frame = String::new();
+                        engine.draw(&mut frame);
+                        assert_eq!(
+                            frame.width(),
+                            width,
+                            "{width} columns, {gap} gap, {frame:?}"
+                        );
+                        for cluster in frame.graphemes(true) {
+                            assert!(
+                                cluster == " " || whole.contains(&cluster),
+                                "split cluster {cluster:?} in {frame:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn continuous_scrolling_covers_the_screen_when_the_text_is_narrow() {
+        // A text narrower than the viewport tiles: "ab" with gap 2 in a
+        // 10-wide viewport shows three copies at once, 2 columns apart.
+        let mut engine = scrolling_continuously("ab", 10, 2);
+        assert_eq!(frame_at(&mut engine, 10), "ab  ab  ab");
+    }
+
+    #[test]
+    fn a_continuous_resize_keeps_the_stream_at_its_point_of_trip() {
+        // A pure width change does not move the stream one column: the
+        // period has nothing to do with the viewport.
+        let text = "hello 世界";
+        let mut engine = scrolling_continuously(text, 120, 8);
+        for _ in 0..engine.cycle() * 3 + 5 {
+            engine.advance();
+        }
+        let offset = engine.offset();
+        let mut before = String::new();
+        engine.draw(&mut before);
+
+        engine.resize(70);
+        assert_eq!(engine.offset(), offset, "the phase is width-independent");
+        let mut after = String::new();
+        engine.draw(&mut after);
+        // The same stream, seen through a narrower window: every character
+        // on screen before is on screen after, at the same column.
+        for cluster in before.graphemes(true).filter(|c| *c != " ") {
+            assert!(after.contains(cluster), "lost {cluster:?}: {after:?}");
+        }
+
+        // Growing back is equally seamless, and whatever the width, the
+        // stream still appears and every frame fills the viewport.
+        for width in [1, 3, 40, 70, 200] {
+            let mut engine = scrolling_continuously(text, 120, 8);
+            for _ in 0..engine.cycle() * 2 + 3 {
+                engine.advance();
+            }
+            engine.resize(width);
+            let frames = frames_of_a_cycle(&mut engine);
+            assert_eq!(frames.len(), engine.cycle());
+            assert!(
+                frames.iter().any(|frame| frame.trim() != ""),
+                "stream never appears after resizing to {width}"
+            );
+            assert!(
+                frames.iter().all(|frame| frame.width() == width),
+                "a resized frame is still exactly {width} columns"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_text_and_zero_width_stay_harmless_in_continuous_mode() {
+        let mut engine = scrolling_continuously("", 5, 2);
+        assert_eq!(engine.cycle(), 2);
+        assert_eq!(frames_of_a_cycle(&mut engine), vec!["     "; 2]);
+
+        let mut engine = scrolling_continuously("abc", 0, 2);
+        assert_eq!(engine.cycle(), 5);
+        assert_eq!(frames_of_a_cycle(&mut engine), vec![""; 5]);
+
+        // Nothing to draw, nowhere to draw it, no gap: still well defined.
+        let mut engine = Engine::new(prepare(""), 0, continuous(Direction::Left, 0));
+        assert_eq!(engine.cycle(), 1);
+        assert_eq!(frames_of_a_cycle(&mut engine), vec![""]);
     }
 
     #[test]
@@ -1038,6 +1378,89 @@ mod tests {
                 (a, column)
             } else {
                 (zhong, column - 6)
+            };
+            assert_eq!(slice.glyph, glyph, "offset {offset}");
+            assert_eq!(slice.clip_left, glyph_column, "offset {offset}");
+            assert_eq!(slice.screen_col, 0);
+            assert_eq!(slice.visible_cols(), 1);
+        }
+    }
+
+    #[test]
+    fn big_continuous_mode_tiles_copies_through_the_viewport() {
+        // The engine of the big-font continuous stream: "中A" at scale 1 is
+        // an 18-cell strip; with gap 0 the period is 18 and a cycle is a
+        // period, not the travel.
+        let strip = BigStrip::build(&prepare("中A"), &face(), 1);
+        let mut engine = Engine::new_big(
+            strip,
+            5,
+            Motion {
+                continuous: true,
+                ..motion(Direction::Left, false, 0)
+            },
+        );
+        assert_eq!(engine.cycle(), 18, "one period of the strip");
+
+        // offset 19: copy zero's head has left and its A is exiting at the
+        // left edge, while copy one's 中 is already poking into the right
+        // edge — the screen never empties. Classic mode would still be
+        // showing copy zero alone (travel is 5 + 18 = 23).
+        let slices = slices_at(&mut engine, 19);
+        assert_eq!(slices.len(), 2, "{slices:?}");
+        let resolved = face();
+        let zhong = resolved.resolve_char('中');
+        let a = resolved.resolve_char('A');
+        // Copy zero: 中 spans [−14, −2), A spans [−2, 4) — A left-clipped.
+        assert_eq!(slices[0].glyph, a);
+        assert_eq!((slices[0].clip_left, slices[0].clip_right), (2, 0));
+        assert_eq!(slices[0].screen_col, 0);
+        // Copy one: 中 spans [4, 16) — right-clipped to one column.
+        assert_eq!(slices[1].glyph, zhong);
+        assert_eq!((slices[1].clip_left, slices[1].clip_right), (0, 11));
+        assert_eq!(slices[1].screen_col, 4);
+
+        // The copies always tile the viewport without a gap, and a cycle
+        // later the same stream geometry repeats exactly.
+        let before: Vec<_> = slices_at(&mut engine, 19)
+            .into_iter()
+            .map(|s| (s.glyph, s.clip_left, s.clip_right, s.screen_col))
+            .collect();
+        let after: Vec<_> = slices_at(&mut engine, 19 + 18)
+            .into_iter()
+            .map(|s| (s.glyph, s.clip_left, s.clip_right, s.screen_col))
+            .collect();
+        assert_eq!(before, after, "the stream is periodic with its period");
+    }
+
+    #[test]
+    fn a_one_column_viewport_sweeps_a_continuous_stream_column_by_column() {
+        // The strictest no-column-jump check for tiling: a 1-wide viewport
+        // on the "A中" stream (period 18, gap 0) shows strip columns
+        // 0, 1, 2 … in order, wrapping from the end of one copy to the
+        // start of the next without a seam.
+        let face = face();
+        let a = face.resolve_char('A');
+        let zhong = face.resolve_char('中');
+        let strip = BigStrip::build(&prepare("A中"), &face, 1);
+        let mut engine = Engine::new_big(
+            strip,
+            1,
+            Motion {
+                continuous: true,
+                ..motion(Direction::Left, false, 0)
+            },
+        );
+
+        for offset in 1..=2 * engine.cycle() + 3 {
+            let slices = slices_at(&mut engine, offset);
+            assert_eq!(slices.len(), 1, "offset {offset}");
+            let slice = &slices[0];
+            let column = offset - 1; // the stream column under the viewport
+            let (glyph, glyph_column) = if column % 18 < 6 {
+                (a, column % 18)
+            } else {
+                (zhong, column % 18 - 6)
             };
             assert_eq!(slice.glyph, glyph, "offset {offset}");
             assert_eq!(slice.clip_left, glyph_column, "offset {offset}");
