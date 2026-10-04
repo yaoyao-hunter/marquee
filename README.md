@@ -1,283 +1,157 @@
+<div align="center">
+
 # marquee
 
-Scroll text across your terminal — on one line, measured in display columns, and
-correct for CJK, emoji and mixed-width text.
+**终端跑马灯**：按显示列宽精确滚动的字幕工具，正确处理中日韩、emoji 与
+混合宽度的 Unicode。单行模式与像素大字体模式，主题可 DIY，色彩可以很花。
 
-![demo](assets/demo.gif)
+[安装](#安装与配置) · [用法](#详细用法与配图) · [主题](#主题示例) · [English](README.en.md)
 
-The package on crates.io is **`terminal-marquee`** (the name `marquee` was taken
-in 2023 by an unrelated crate); the binary it installs is `marquee`.
+</div>
 
-## Demo
+## 特性
 
-The GIF above is a real capture of `marquee "你好世界 · Hello Terminal"` in a
-40-column terminal, played back one column per 60 ms (the default is 50 ms).
-These are six frames from the run that includes the rocket:
+- **列宽正确**：以终端显示列（而不是字符数）计量滚动，宽字符不劈半、
+  emoji 不散架、组合字符不丢
+- **两种模式**：单行滚动；`--big` 像素大字体（半块字符拼出 `6·N` 行大字）
+- **连续滚动**：`--continuous` 让下一份文字紧跟着上一份，LED 屏幕流效果
+- **主题系统**：11 个内置主题，含彩虹调色盘；自己的主题写在
+  `~/.config/marquee/themes.toml`，无需改代码
+- **零残留**：不进备用屏幕、每帧一次带缓冲写入、退出时擦干净自己，
+  shell 提示符完好如初
+- **可管道**：`echo 部署中… | marquee`，断管静默退出
 
-```text
-$ marquee "你好世界 · Hello Terminal 🚀"
-                    你好世界 · Hello Ter
-              你好世界 · Hello Terminal
-        你好世界 · Hello Terminal 🚀
-  你好世界 · Hello Terminal 🚀
- Hello Terminal 🚀
- Terminal 🚀
-```
+## 安装与配置
 
-Every frame is exactly the terminal's width, `你好世界` counts as 8 columns, the
-rocket as 2, and no frame ever splits a character in half.
+### 要求
 
-## Installation
+- macOS 或 Linux
+- Rust 1.85+（edition 2024）
+- 支持半块字符（`█ ▀ ▄`）与 256 色的终端（大字体/主题需要）
 
-From crates.io:
+### 安装
 
 ```sh
-cargo install terminal-marquee
+git clone https://github.com/yaoyao-hunter/marquee.git
+cd marquee
+cargo install --path .        # 装进 ~/.cargo/bin
 ```
 
-From a checkout:
+不想安装也可以直接跑：`cargo run --release -- "你好世界"`。
 
-```sh
-git clone https://github.com/yaoyao-hunter/marquee
-cargo install --path marquee
-```
+### 配置
 
-Both install a binary called `marquee`. It needs no configuration, no data files
-and no network at run time.
+| 配置项 | 位置 | 说明 |
+|---|---|---|
+| 用户主题 | `~/.config/marquee/themes.toml` | `[名字]` + 颜色/加粗/色带，见[主题](#主题示例) |
+| 主题文件位置 | `XDG_CONFIG_HOME/marquee/themes.toml` | 有 XDG 时优先 |
+| `NO_COLOR` | 环境变量 | 非空则强制纯色输出（[no-color.org](https://no-color.org) 约定） |
+| `COLUMNS` / `LINES` | 环境变量 | 输出重定向（管道/文件）时假定的终端尺寸，默认 80×24 |
 
-## Usage
+无配置文件也能用：所有主题内置，配置只是覆盖与新增。
+
+## 快速上手
 
 ```sh
 marquee "你好世界 · Hello Terminal 🚀"
 ```
 
-The marquee takes over the line the cursor is on: it hides the cursor, scrolls
-the text there, and never touches anything else — no alternate screen, the
-scrollback stays intact. On exit, in every path — the cycles ran out, Ctrl+C,
-even a panic — the line is erased, the cursor is shown again and raw mode is
-left behind, so the shell prompt lands on a clean line.
+![单行滚动](docs/images/single-line.gif)
 
-It loops forever by default. Stop it with Ctrl+C, or bound it:
+## 详细用法与配图
+
+### 速度与方向
 
 ```sh
-marquee --once " deploying… "          # one cycle, then exit
-marquee --repeat 3 " hello "           # exactly three cycles
+marquee --speed 30 "快一点"          # 每帧 30ms（默认 50）
+marquee --fps 25 "25 帧每秒"         # 与 --speed 互斥
+marquee --direction right "从左往右"  # 默认 left
 ```
 
-By default the next round waits for the text to leave the screen entirely.
-`--continuous` makes the next copy follow the previous one, `--gap` columns
-behind it, so the stream never empties — the classic LED-marquee look:
+### 连续滚动
+
+下一份文字隔着 `--gap` 列紧跟着上一份，不等待清屏，无缝循环：
 
 ```sh
-marquee --continuous " ON AIR "        # the tail leads, the head follows
+marquee --continuous --gap 8 " ON AIR · STREAMING LIVE " --theme rainbow
 ```
 
-Exit codes:
+![连续滚动](docs/images/continuous.gif)
 
-| code | meaning |
-| --- | --- |
-| 0 | the cycles ran out, or you stopped it with Ctrl+C |
-| 1 | drawing failed (a real I/O error) |
-| 2 | usage: no text, blank text, a bad flag, or an unusable theme |
+`--once` / `--repeat N` 按周期计数；`--continuous` 与 `--bounce` 互斥。
 
-Redirected output behaves like a Unix citizen: with stdout not a terminal, each
-frame becomes one plain line with no escape bytes, paced as usual, and when the
-reader goes away (`marquee … | head -3`) marquee exits 0 in silence instead of
-printing "Broken pipe".
+### 大字体模式
 
-## Big-font mode
-
-`--big` scrolls the text as large pixel glyphs spanning several terminal rows,
-rendered from the embedded Fusion Pixel Font (12px, zh-Hans + ASCII, tofu for
-anything missing) with half-block characters:
+像素级放大（`--scale N`，字形 `12·N` 列 × `6·N` 行），半块字符平滑进出
+屏幕边缘：
 
 ```sh
-marquee "你好世界" --big --scale 2
+marquee --big --scale 2 "ON AIR" --theme alarm
 ```
 
-The glyphs occupy `6·scale` rows: the line the cursor is on, plus the rows
-above it. Everything else behaves like the single line — no alternate screen,
-one buffered write per frame, and on exit (or Ctrl+C, or a panic) those rows
-are erased and the shell's line comes back blank.
+![大字体模式](docs/images/big-font.gif)
 
-Big mode names the terminal it needs: at least `12·scale` columns (one whole
-glyph) by `6·scale + 1` rows (the glyph rows plus a line of margin). A smaller
-terminal is refused before the first frame — exit 2, the needed size on
-stderr. A window that shrinks below the limit mid-run does not stop the
-scroll: the scale re-clamps down, and back up when the window grows again,
-with a stderr notice naming the size that restores it. Every main-mode
-option works in big mode — `--continuous` tiles the big glyphs into a stream,
-`--theme` colours the half-blocks — and `--align` has no effect there either.
+终端必须容得下它：至少 `12·N` 列 × `6·N + 1` 行，否则开局退出码 2 并
+提示所需尺寸；运行中窗口变小则自动降级继续滚。
 
-The full reference — every flag, the input rule, exit codes, environment — is
-the manual page: [docs/marquee.1](docs/marquee.1), read it with
-`man docs/marquee.1`. Big-font mode has its own complete manual in markdown:
-[docs/manual.md](docs/manual.md), with a Chinese version at
-[docs/manual.zh-CN.md](docs/manual.zh-CN.md).
-
-## Unicode & CJK
-
-Widths are counted the way terminals count them, in display columns:
-
-- CJK characters count 2 (`你好世界` = 8 columns)
-- emoji count 2 (`🚀`), combining marks count 0
-- a family joined by zero-width joiners is one unit of 2 columns
-- text is segmented into grapheme clusters, never `chars()` or `len()`
-
-A cluster that would straddle the edge of the frame is dropped for that frame
-rather than split — a terminal cannot draw half a `你` — and the frame is
-padded back out to the exact width, so nothing shifts and nothing wraps.
-
-When the terminal is resized mid-scroll, the next frame is already the new
-width, with the text kept at the same point of its trip.
-
-## Themes
-
-`--theme` colours the text — on the single line and in big mode alike, where
-the foreground colours the half-blocks and the background the blank cells:
+### 管道输入
 
 ```sh
-marquee "你好世界" --theme matrix
-marquee --big --scale 2 "部署中" --theme alarm
-marquee " ON AIR " --continuous --theme rainbow
-```
-
-Eleven themes ship built in: `default` (no colour, the default), `bold`,
-`alarm` (bold bright red), `gold` (bold bright yellow), `matrix` (bold bright
-green), `ice` (bright cyan), `violet` (bold bright magenta) — and four
-palettes: `rainbow` (six vivid ANSI colours cycling per column), `sunset`,
-`ocean` and `neon` (RGB palettes). A palette is banded: the colours cycle
-across the screen's columns and the text flows through them, so a big-font
-glyph wider than a band shows several colours at once — the rainbow
-pixel-art look.
-
-Your own themes live in a theme file — a small TOML subset — and need no code
-change; the configuration and the drawing are separate layers:
-
-```toml
-# ~/.config/marquee/themes.toml
-[alert]
-fg = "bright-red"        # a named colour (16 ANSI) or #rrggbb
-bold = true
-
-[ocean]
-fg = "#7fd4ff"
-bg = "blue"
-dim = true               # also: italic, underline
-
-[sunset]
-fg = ["#ff5e62", "#ff9966", "#ffd194"]   # a list is a palette
-band = 4                 # columns per colour, default 1
-```
-
-A palette needs at least one colour; one entry is a solid colour, two or
-more cycle across the columns. `bg` takes lists too, painting the padding
-spaces as bands. A theme name that collides with a built-in replaces it.
-Point `--theme-file` at another path to keep themes per project; the default
-location is `$XDG_CONFIG_HOME/marquee/themes.toml`, else
-`~/.config/marquee/themes.toml`. `--no-color` (or a non-empty `NO_COLOR` in
-the environment) scrolls plain regardless of the theme; redirected output
-never carries colour bytes.
-
-## Piping text
-
-Text can come from a pipe:
-
-```sh
-echo "正在部署..." | marquee
+echo "正在部署 ..." | marquee
 git log --oneline -1 | marquee --speed 30
 ```
 
-The rule when both are possible, in order:
+无位置参数时读管道 stdin：逐行去空白、空行丢弃、单空格连接。
 
-1. A positional `TEXT` wins, and stdin is never read.
-2. With no `TEXT`, piped stdin is read to EOF: each line is trimmed, blank
-   lines are dropped, and the rest are joined with a single space — a marquee
-   scrolls one line.
-3. With no `TEXT` and a terminal on stdin, marquee refuses to block: it exits 2
-   with a message instead of sitting there waiting for you to type.
+### 完整参考
 
-Blank input is refused either way (there would be nothing to scroll).
+- 手册页：`man docs/marquee.1`（所有标志、退出码、环境变量）
+- 大字体模式手册：[docs/manual.md](docs/manual.md)，
+  中文版 [docs/manual.zh-CN.md](docs/manual.zh-CN.md)
+- 英文 README：[README.en.md](README.en.md)
 
-## tmux
+## 主题示例
 
-marquee works inside tmux and other multiplexers. Resizing the pane sends the
-resize to the program the moment it happens — the very next frame is drawn at
-the new width, with the text kept at the same point of its trip rather than
-wrapping or stranding. Ctrl+C stops it cleanly: cursor visible, raw mode off,
-exit 0. The line it used is given back to the pane, scrollback untouched.
+```sh
+marquee "好消息 · marquee v1 正式发布" --theme matrix
+marquee "sunset · 落日色带 warm bands" --theme sunset
+```
 
-## Options
+![matrix 主题](docs/images/theme-matrix.gif)
+![sunset 主题](docs/images/theme-sunset.gif)
 
-| option | default | meaning |
-| --- | --- | --- |
-| `TEXT` (positional) | — | the text to scroll; otherwise piped stdin |
-| `--speed <MS>` | 50 | milliseconds per column step (1–10000) |
-| `--fps <FPS>` | — | frames per second (1–1000); conflicts with `--speed` |
-| `--direction <left\|right>` | `left` | which edge the text enters from |
-| `--bounce` | off | reverse at both edges instead of wrapping |
-| `--continuous` | off | the next copy follows the previous one onto the screen; conflicts with `--bounce` |
-| `--gap <COLUMNS>` | 8 | blank columns between cycles (or between copies, with `--continuous`) |
-| `--once` | — | scroll exactly one cycle, then exit |
-| `--repeat <N>` | — | scroll exactly N cycles; conflicts with `--once` |
-| `--align <left\|center\|right>` | `left` | accepted, currently no effect — see below |
-| `--no-color` | — | scroll plain, whatever `--theme` says; honours `NO_COLOR` too |
-| `--theme <NAME>` | `default` | colour theme: built-in, or from the theme file |
-| `--theme-file <PATH>` | ~/.config/marquee/themes.toml | where user themes come from |
-| `--big` | off | scroll as big pixel glyphs over `6·scale` rows |
-| `--scale <N>` | 1 | big-mode pixel magnification (1–32); the terminal must fit 12·N columns × (6·N+1) rows |
-| `--font <name>` | `zh-hans` | which packaged pixel font `--big` uses |
+自己的主题写在 `~/.config/marquee/themes.toml`（或 `--theme-file` 指定），
+配置层与绘制层解耦，加主题不用改代码：
 
-`--speed`/`--fps` and `--once`/`--repeat` each conflict with each other, and
-marquee says so rather than guessing. `--scale` and `--font` need `--big`.
-`--align` is parsed and validated but does nothing yet: placement of text
-shorter than the terminal is still to come, and the flag is reserved for it.
-Everything else above does exactly what it says.
+```toml
+[sunset]
+fg = ["#ff5e62", "#ff9966", "#ffd194"]   # 颜色列表 = 调色盘
+band = 4                                  # 每色占几列（默认 1）
 
-In continuous mode a cycle is one *period* of the stream — the text plus its
-`gap` — so `--repeat N` counts N passes of the content past any fixed column,
-and the screen does not end blank when the cycles run out (the line is still
-cleaned up on exit). `--bounce` and `--continuous` contradict each other and
-are refused together.
+[alarm]
+fg = "bright-red"                         # 单色 = 纯色主题
+bold = true
+```
 
-## Development
+调色盘沿屏幕列铺色带、文字从色带中流过；比色带宽的字形会同时显示多种
+颜色。`fg`/`bg` 支持 16 个 ANSI 颜色名或 `#rrggbb`，还有 `bold/dim/
+italic/underline`。
+
+<p align="center">
+  <a href="docs/themes.md"><b>🎨 查看全部 11 个内置主题（含配图与 TOML 定义）→</b></a>
+</p>
+
+## 开发
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-cargo run -- "你好世界 · Hello Terminal 🚀"   # the quickest smoke test
 ```
 
-Where the behaviour lives:
+文档配图（GIF）用 [vhs](https://github.com/charmbracelet/vhs) 录制，
+tape 在 [`tools/vhs/`](tools/vhs/)：`cd docs/images && vhs ../../tools/vhs/single-line.tape`。
 
-| module | what it owns |
-| --- | --- |
-| `src/unicode.rs` | grapheme clusters with display widths, precomputed once |
-| `src/cli.rs` | the command line and the TEXT-vs-stdin precedence rule |
-| `src/theme.rs` | the theme layer: built-ins, user theme files, colour names, palettes |
-| `src/terminal.rs` | raw mode, resizes, Ctrl+C, restoring the terminal |
-| `src/marquee.rs` | the scroll engine: one column of travel per frame, continuous tiling |
-| `src/renderer.rs` | frame drawing (one line or `6·scale` big rows), pacing, themes as SGR, and the clean exit |
-| `src/main.rs` | the run loop that ties them together |
-| `src/bigfont/` | the committed glyph atlas: parser, cluster mapping, rasterizer |
-| `tools/gen-bigfont` | regenerates the atlas from the Fusion Pixel Font BDF release |
+## 许可
 
-### Big-font assets
-
-`assets/bigfont-12px-zh-hans.bin` is a compact glyph atlas generated at
-development time from the official Fusion Pixel Font BDF release by
-`tools/gen-bigfont` and committed to the repo, so builds stay offline and
-`cargo install` needs no font downloads. The binary format, the recorded
-provenance (release tag + sha256) and the regeneration procedure are in
-[docs/bigfont-asset-format.md](docs/bigfont-asset-format.md).
-
-## Acknowledgements
-
-- [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) by TakWolf,
-  licensed under the [SIL Open Font License 1.1](assets/fusion-pixel/LICENSE-OFL).
-  It merges glyphs from Ark Pixel Font, Cubic 11 and Galmuri; the full
-  copyright notices live in
-  [assets/fusion-pixel/COPYRIGHT.md](assets/fusion-pixel/COPYRIGHT.md).
-
-MIT licensed — see [LICENSE](LICENSE).
+[MIT](LICENSE)
