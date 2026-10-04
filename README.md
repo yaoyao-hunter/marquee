@@ -97,6 +97,10 @@ margin); when that happens a notice goes to stderr explaining the scale that
 actually runs. The same fitting happens live on every resize. Every main-mode
 option works in big mode; `--align` has no effect there either.
 
+The full reference — every flag, the input rule, exit codes, environment — is
+the manual page: [docs/marquee.1](docs/marquee.1), read it with
+`man docs/marquee.1`.
+
 ## Unicode & CJK
 
 Widths are counted the way terminals count them, in display columns:
