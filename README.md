@@ -173,4 +173,12 @@ development time from the official Fusion Pixel Font BDF release by
 provenance (release tag + sha256) and the regeneration procedure are in
 [docs/bigfont-asset-format.md](docs/bigfont-asset-format.md).
 
+## Acknowledgements
+
+- [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) by TakWolf,
+  licensed under the [SIL Open Font License 1.1](assets/fusion-pixel/LICENSE-OFL).
+  It merges glyphs from Ark Pixel Font, Cubic 11 and Galmuri; the full
+  copyright notices live in
+  [assets/fusion-pixel/COPYRIGHT.md](assets/fusion-pixel/COPYRIGHT.md).
+
 MIT licensed — see [LICENSE](LICENSE).
