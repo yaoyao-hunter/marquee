@@ -77,6 +77,10 @@ frame becomes one plain line with no escape bytes, paced as usual, and when the
 reader goes away (`marquee … | head -3`) marquee exits 0 in silence instead of
 printing "Broken pipe".
 
+The full reference — every flag, the input rule, exit codes, environment — is
+the manual page: [docs/marquee.1](docs/marquee.1), read it with
+`man docs/marquee.1`.
+
 ## Unicode & CJK
 
 Widths are counted the way terminals count them, in display columns:
