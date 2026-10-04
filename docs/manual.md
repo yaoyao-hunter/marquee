@@ -13,7 +13,7 @@ echo "under construction" | marquee --big --direction right
 ```
 
 This manual covers big-font usage completely: the flags, the geometry, the
-scrolling behaviour, scale fitting, input, redirected output and exit
+scrolling behaviour, the size limits, input, redirected output and exit
 behaviour. The single-line mode and the general rules (input precedence, exit
 codes, environment) are documented in [docs/marquee.1](marquee.1) and the
 [README](../README.md); nothing there changes except what is stated below.
@@ -23,7 +23,7 @@ codes, environment) are documented in [docs/marquee.1](marquee.1) and the
 | Flag | Value | Default | Rules |
 |------|-------|---------|-------|
 | `--big` | — | off | Enables big-font mode. |
-| `--scale N` | 1–32 | 1 | Pixel magnification. Requires `--big`. Fitted to the terminal height (see below). |
+| `--scale N` | 1–32 | 1 | Pixel magnification. Requires `--big`. The terminal must fit it (see below). |
 | `--font name` | `zh-hans` | `zh-hans` | Which packaged pixel font to render with. Requires `--big`. |
 
 - `--scale` and `--font` without `--big` are usage errors (exit 2): they only
@@ -76,26 +76,35 @@ edge cuts through a glyph, the glyph is clipped at that edge — a half `你`
 enters and leaves the screen smoothly — so the motion never jumps a column
 and nothing wraps to the next line.
 
-## Scale fitting and resize
+## Size limits and resize
 
-`--scale N` is fitted to the terminal height with one row of margin:
-
-```
-6·N ≤ rows − 1          i.e.  N ≤ (rows − 1) / 6
-```
-
-A `--scale` that does not fit is reduced to the largest `N` that does, and a
-notice goes to **stderr** — stdout stays clean for piping:
+Big mode names the smallest terminal it will run on, per scale: the viewport
+must show one whole full-width glyph, and fit the glyph rows with one line of
+margin:
 
 ```
-marquee: --scale 9 does not fit 24 terminal rows; scrolling at --scale 3
+columns ≥ 12·N        rows ≥ 6·N + 1
 ```
 
-The fitting happens at startup and again on every resize: growing the window
-can raise the running scale back toward the requested one, shrinking lowers
-it, and a notice is printed each time the applied scale actually changes. A
-resize also redraws the very next frame at the new width with the text kept
-at the same point of its trip.
+A terminal smaller than that is refused before anything is drawn — exit 2,
+the message on **stderr** (stdout stays clean for piping):
+
+```
+marquee: the terminal is too small for --big --scale 2: needs at least 24 columns × 13 rows, this terminal is 20×12
+```
+
+A window that shrinks below the limits mid-run does not stop the scroll: the
+scale is re-fitted to the height — down when the window shrinks, back toward
+the request when it grows again — the glyphs are clipped to the narrower
+viewport, and one notice goes to **stderr** naming the size that restores the
+run:
+
+```
+marquee: the terminal became too small for --big --scale 2: needs at least 24 columns × 13 rows, scrolling at --scale 1 until it fits again
+```
+
+A resize redraws the very next frame at the new width with the text kept at
+the same point of its trip.
 
 ## Input
 
@@ -110,9 +119,10 @@ input is refused (exit 2).
 When stdout is not a terminal, each frame is written as `6·N` plain lines —
 one per cell row, no cursor positioning, no escape bytes — paced as usual.
 `COLUMNS` and `LINES` supply the assumed size in that situation (defaults 80
-and 24), and the scale is fitted against `LINES`. If the reader of the pipe
-goes away (`marquee --big … | head -3`), marquee exits 0 in silence instead
-of reporting a broken pipe.
+and 24), and the size limits are checked against them: a pipe too narrow or
+too short for `--scale N` is refused the same way a small window is. If the
+reader of the pipe goes away (`marquee --big … | head -3`), marquee exits 0
+in silence instead of reporting a broken pipe.
 
 ## Terminal and exit behaviour
 
@@ -134,8 +144,8 @@ Default magnification, one glyph = 12 columns × 6 rows:
 marquee "你好世界" --big
 ```
 
-Double size — each glyph 24 columns × 12 rows; any terminal of 13 rows or
-taller fits it without clamping:
+Double size — each glyph 24 columns × 12 rows; the terminal must be at
+least 24 columns by 13 rows:
 
 ```sh
 marquee "你好世界" --big --scale 2
@@ -153,11 +163,12 @@ Bouncing billboard with a tight gap, exactly three cycles:
 marquee --big --bounce --gap 2 --repeat 3 " ON AIR "
 ```
 
-Asking for more scale than the terminal fits (24-row terminal):
+Asking for more scale than the terminal fits (80×24 terminal, scale 9 needs
+108×55):
 
 ```sh
 $ marquee --big --scale 9 "hello"
-marquee: --scale 9 does not fit 24 terminal rows; scrolling at --scale 3
+marquee: the terminal is too small for --big --scale 9: needs at least 108 columns × 55 rows, this terminal is 80×24
 ```
 
 Frames as plain text, one file per run of `6·N` lines per frame:

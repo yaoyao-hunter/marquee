@@ -16,7 +16,7 @@ use clap::Parser;
 
 use bigfont::BigFontFace;
 use cli::Cli;
-use marquee::{BigStrip, Direction, Engine, Motion, clamp_scale};
+use marquee::{BigStrip, Direction, Engine, Motion, min_term_size};
 use renderer::{BigRenderer, Renderer};
 use terminal::{Terminal, TerminalEvent};
 use unicode::{PreparedText, prepare};
@@ -24,8 +24,8 @@ use unicode::{PreparedText, prepare};
 /// Exit code for an I/O failure while drawing.
 const EXIT_IO: u8 = 1;
 
-/// Exit code for a usage error: bad flags (clap's own code) or no text to
-/// scroll.
+/// Exit code for a usage error: bad flags (clap's own code), no text to
+/// scroll, or a terminal too small for the big mode asked for.
 const EXIT_USAGE: u8 = 2;
 
 /// Scrolls `TEXT` — or piped stdin — across the terminal's current line until
@@ -34,7 +34,7 @@ const EXIT_USAGE: u8 = 2;
 /// Exit codes: `0` for a scroll that ran its cycles, one the user stopped with
 /// Ctrl+C, and one whose reader went away (`marquee … | head`); `1` when
 /// drawing failed for a real reason; `2` for a usage error (clap's own code for
-/// bad flags).
+/// bad flags, or a terminal smaller than big mode needs).
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -48,6 +48,14 @@ fn main() -> ExitCode {
 
     let mut terminal = terminal::open();
     let scrolled = if cli.big() {
+        // The size gate: big mode names the terminal it needs, and anything
+        // smaller is refused before a single frame takes the line over.
+        let (columns, rows) = terminal.size();
+        if let Some(message) = big_size_error(cli.scale(), columns, rows) {
+            drop(terminal);
+            eprintln!("marquee: {message}");
+            return ExitCode::from(EXIT_USAGE);
+        }
         match big_font(cli.font()) {
             Ok(face) => scroll_big(
                 prepare(&text),
@@ -212,10 +220,12 @@ fn scroll(
 
 /// Scrolls the text as big pixel glyphs over `6·scale` rows.
 ///
-/// The requested scale is fitted to the terminal height (§4: `6·scale ≤
-/// term_rows − 1`) before the first frame, and re-fitted on every resize —
-/// each time it actually changes, a notice goes to stderr so the user knows
-/// why their `--scale` was reduced.
+/// The caller has already refused a terminal smaller than big mode needs
+/// (see [`big_size_error`]); here only a resize can break the rule, and
+/// that is tolerated rather than fatal: the scale re-clamps to the height —
+/// down when the window shrinks, back up when it grows again — and one
+/// notice goes to stderr naming the size the run needs, without stopping
+/// the scroll.
 fn scroll_big(
     prepared: PreparedText,
     motion: Motion,
@@ -224,30 +234,53 @@ fn scroll_big(
     face: &BigFontFace<'static>,
     terminal: &mut dyn Terminal,
 ) -> io::Result<()> {
-    let (columns, rows) = terminal.size();
-    let clamp = clamp_scale(requested_scale, rows);
-    if clamp.clamped {
-        clamp_notice(clamp.requested, clamp.applied, rows);
-    }
-    let strip = BigStrip::build(&prepared, face, clamp.applied);
-    let engine = Engine::new_big(strip, columns, motion);
+    let strip = BigStrip::build(&prepared, face, requested_scale);
+    let engine = Engine::new_big(strip, terminal.width(), motion);
     let renderer = BigRenderer::new(interval);
-    let mut applied = clamp.applied;
+    // Whether the too-small notice is already standing on stderr, so a run
+    // that dips below the limit says it once, not once per resize event.
+    let mut noticed = false;
 
     run_loop(engine, renderer, terminal, |columns, rows, engine| {
         let clamp = engine.resize_big(columns, rows);
-        if clamp.applied != applied {
-            clamp_notice(clamp.requested, clamp.applied, rows);
-            applied = clamp.applied;
+        let (min_columns, min_rows) = min_term_size(requested_scale);
+        if columns >= min_columns && rows >= min_rows {
+            // Fits again: the next dip below the limit is news again.
+            noticed = false;
+        } else if !noticed {
+            eprintln!(
+                "marquee: {}",
+                too_small_notice(requested_scale, clamp.applied)
+            );
+            noticed = true;
         }
     })
 }
 
-/// The stderr notice for a `--scale` the terminal cannot fit.
-fn clamp_notice(requested: usize, applied: usize, rows: usize) {
-    eprintln!(
-        "marquee: --scale {requested} does not fit {rows} terminal rows; scrolling at --scale {applied}"
-    );
+/// Why big mode cannot start at `scale` on a `columns × rows` terminal:
+/// smaller than one whole full-width glyph, or shorter than the glyph rows
+/// plus a line of margin (§4, [`min_term_size`]). `None` means it fits.
+fn big_size_error(scale: usize, columns: usize, rows: usize) -> Option<String> {
+    let (min_columns, min_rows) = min_term_size(scale);
+    (columns < min_columns || rows < min_rows).then(|| {
+        format!(
+            "the terminal is too small for --big --scale {scale}: \
+             needs at least {min_columns} columns × {min_rows} rows, \
+             this terminal is {columns}×{rows}"
+        )
+    })
+}
+
+/// The stderr notice for a terminal that shrank below what the run needs:
+/// the scroll carries on degraded (scale re-clamped, glyphs clipped), so
+/// the user is told the size that brings it back.
+fn too_small_notice(scale: usize, applied: usize) -> String {
+    let (min_columns, min_rows) = min_term_size(scale);
+    format!(
+        "the terminal became too small for --big --scale {scale}: \
+         needs at least {min_columns} columns × {min_rows} rows, \
+         scrolling at --scale {applied} until it fits again"
+    )
 }
 
 #[cfg(test)]
@@ -553,23 +586,92 @@ mod tests {
     }
 
     #[test]
-    fn big_scale_is_clamped_to_the_terminal_height() {
-        // 20 rows fit a scale of at most (20−1)/6 = 3: 18 rows of cells.
-        let args = [
-            "--big", "--once", "--gap", "0", "--speed", "1", "--scale", "4", "中",
-        ];
-        let mut terminal = FakeTerminal::new(12, 20);
+    fn big_mode_names_the_terminal_it_needs_and_refuses_smaller_ones() {
+        // §4 via min_term_size: 12·scale columns (one whole glyph) and
+        // 6·scale+1 rows (glyph rows plus a line of margin). The exact
+        // minimum is legal.
+        for (scale, columns, rows) in [(1, 12, 7), (2, 24, 13), (4, 48, 25), (32, 384, 193)] {
+            assert!(
+                big_size_error(scale, columns, rows).is_none(),
+                "scale {scale} on {columns}×{rows} is the exact minimum"
+            );
+        }
+        for (scale, columns, rows) in [
+            (1, 11, 24), // narrower than one glyph
+            (1, 80, 6),  // shorter than the glyph rows plus margin
+            (2, 24, 12), // one row short of the minimum
+            (4, 12, 20), // both at once — the old behaviour clamped this to 3
+        ] {
+            let message = big_size_error(scale, columns, rows)
+                .unwrap_or_else(|| panic!("scale {scale} on {columns}×{rows} must be refused"));
+            let (min_columns, min_rows) = min_term_size(scale);
+            assert!(
+                message.contains(&format!("{min_columns} columns × {min_rows} rows")),
+                "the minimum is named: {message}"
+            );
+            assert!(
+                message.contains(&format!("{columns}×{rows}")),
+                "what we got is named: {message}"
+            );
+            assert!(
+                message.contains(&format!("--scale {scale}")),
+                "the request is named: {message}"
+            );
+        }
+    }
 
-        scroll_big_with(&args, &mut terminal).expect("a fake never fails");
+    #[test]
+    fn a_shrunk_window_gets_one_notice_naming_the_size_that_restores_it() {
+        let message = too_small_notice(2, 1);
+        assert!(
+            message.contains("became too small for --big --scale 2"),
+            "{message}"
+        );
+        assert!(
+            message.contains("needs at least 24 columns × 13 rows"),
+            "{message}"
+        );
+        assert!(
+            message.contains("scrolling at --scale 1 until it fits again"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_big_run_survives_a_too_small_window_and_restores_the_scale() {
+        // Scale 2 needs 24×13; the window dips to 8×8 (both limits broken)
+        // and comes back: the scroll never stops, the clamped scale 1 stands
+        // in while small, and scale 2 is restored when the window fits again.
+        let args = [
+            "--big", "--repeat", "1", "--gap", "0", "--speed", "1", "--scale", "2", "中",
+        ];
+        let mut terminal = FakeTerminal::new(60, 40);
+        terminal.push_resize_at(4, 8, 8);
+        terminal.push_resize_at(10, 60, 40);
+
+        scroll_big_with(&args, &mut terminal).expect("a too-small window never kills the scroll");
 
         let frames = terminal.frames();
-        for frame in &frames[..frames.len() - 1] {
-            assert!(
-                frame.starts_with("\x1b[1G\x1b[17A\x1b[2K"),
-                "18 rows from the top of the region: {frame:?}"
+        assert!(
+            frames.len() > 12,
+            "the scroll should have run on: {frames:?}"
+        );
+        for frame in &frames[..3] {
+            assert_eq!(frame.matches("\x1b[2K").count(), 12, "scale 2 is 12 rows");
+        }
+        for frame in &frames[3..9] {
+            assert_eq!(
+                frame.matches("\x1b[2K").count(),
+                6,
+                "the clamped scale 1 stands in: {frame:?}"
             );
-            assert_eq!(frame.matches("\x1b[2K").count(), 18);
-            assert_eq!(strip_escapes(frame).chars().count(), 18 * 12);
+        }
+        for frame in &frames[9..frames.len() - 1] {
+            assert_eq!(
+                frame.matches("\x1b[2K").count(),
+                12,
+                "scale 2 restored when the window grew back: {frame:?}"
+            );
         }
     }
 
