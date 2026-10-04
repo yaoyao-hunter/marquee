@@ -31,13 +31,24 @@ fn main() -> ExitCode {
         }
     };
 
+    let motion = marquee::Motion {
+        direction: match cli.direction() {
+            cli::Direction::Left => marquee::Direction::Left,
+            cli::Direction::Right => marquee::Direction::Right,
+        },
+        bounce: cli.bounce(),
+        gap: cli.gap() as usize,
+        cycles: cli.cycles(),
+    };
+
     // Stub: one static frame, after which dropping the terminal restores
-    // cursor and mode. T-7 replaces this with the paced scroll loop that
-    // honours the rest of `cli` (direction, bounce, gap, align, cycles, frame
-    // interval, colour) and reacts to the resize and quit events the terminal
-    // reports.
+    // cursor and mode. Frame 0 of a scroll is blank by design — the text sits
+    // just off the edge it enters from — so this prints an empty line until
+    // T-7 replaces it with the paced loop that honours the rest of `cli`
+    // (frame interval, colour) and reacts to the resize and quit events the
+    // terminal reports.
     let mut terminal = terminal::open();
-    let engine = marquee::Engine::new(unicode::prepare(&text), terminal.width());
+    let engine = marquee::Engine::new(unicode::prepare(&text), terminal.width(), motion);
     if let Err(err) = renderer::render_frame(&mut terminal, &engine).and_then(|()| terminal.flush())
     {
         eprintln!("marquee: {err}");
