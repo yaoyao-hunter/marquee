@@ -184,10 +184,6 @@ pub fn clamp_scale(requested: usize, term_rows: usize) -> ScaleClamp {
 /// One visible piece of a big strip: the glyph, clipped to the viewport by
 /// whole cell columns (§5). The renderer draws the un-clipped middle part,
 /// starting at `screen_col`.
-///
-/// The fields are read by the T-12 renderer; until then the allow keeps the
-/// gate green (N-3 convention).
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct BigGlyphSlice {
     /// The glyph this slice shows.
@@ -202,8 +198,6 @@ pub struct BigGlyphSlice {
     pub scale: usize,
 }
 
-// Read by the T-12 renderer; N-3 convention until then.
-#[allow(dead_code)]
 impl BigGlyphSlice {
     /// Cell columns actually visible: `advance − clip_left − clip_right`.
     pub fn visible_cols(&self) -> usize {
