@@ -37,10 +37,6 @@ pub const FALLBACK_COLUMNS: usize = 80;
 pub const FALLBACK_ROWS: usize = 24;
 
 /// What the terminal reported while a marquee is running.
-// The event path is wired by the run loop (T-7); until then nothing in the
-// binary asks the terminal what happened. The same allow appears on `poll`,
-// the two `poll` implementations and the crossterm translation below.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalEvent {
     /// The window changed size; the scroll must adapt to the new width.
@@ -65,8 +61,20 @@ pub trait Terminal: Write {
     /// Waits up to `timeout` and returns everything the terminal reported in
     /// that time: resizes, and Ctrl+C as [`TerminalEvent::Quit`]. An empty
     /// result means "nothing happened, draw the next frame".
-    #[allow(dead_code)] // consumed by the run loop (T-7)
+    ///
+    /// The wait is part of the contract: a run loop paces its frames by
+    /// polling for the interval it still owes, so an implementation with
+    /// nothing to report must still let that time pass.
     fn poll(&mut self, timeout: Duration) -> io::Result<Vec<TerminalEvent>>;
+
+    /// Whether the output understands escape sequences.
+    ///
+    /// A terminal does; a redirected stdout does not, where cursor positioning
+    /// would only put unreadable bytes into a file or a pipe. The renderer asks
+    /// this before wrapping a frame.
+    fn supports_escape(&self) -> bool {
+        true
+    }
 }
 
 /// Opens the terminal for a marquee run.
@@ -76,7 +84,6 @@ pub trait Terminal: Write {
 /// terminal to take over, so the result writes plain text and reports no
 /// events. If a real terminal refuses raw mode, marquee degrades to that same
 /// plain behaviour rather than failing to scroll at all.
-// Consumed by the run loop (T-7); the stub in main.rs uses it for one frame.
 pub fn open() -> Box<dyn Terminal> {
     if !io::stdout().is_terminal() {
         return Box::new(PlainTerminal::new(io::stdout(), detect_size()));
@@ -121,7 +128,6 @@ fn sane(value: Option<&str>) -> Option<usize> {
 
 /// Translates a crossterm event into what marquee acts on. Everything else —
 /// mouse input, other keys — is ignored: a marquee takes no other input.
-#[allow(dead_code)] // consumed by the run loop (T-7), via `poll`
 fn translate(event: Event) -> Option<TerminalEvent> {
     match event {
         Event::Resize(columns, rows) => Some(TerminalEvent::Resize {
@@ -134,7 +140,6 @@ fn translate(event: Event) -> Option<TerminalEvent> {
 }
 
 /// Ctrl+C is the only way to ask a marquee to stop.
-#[allow(dead_code)] // consumed by the run loop (T-7), via `translate`
 fn is_quit(key: KeyEvent) -> bool {
     key.kind != KeyEventKind::Release
         && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -221,7 +226,6 @@ impl Terminal for RealTerminal {
         detect_size()
     }
 
-    #[allow(dead_code)] // consumed by the run loop (T-7)
     fn poll(&mut self, timeout: Duration) -> io::Result<Vec<TerminalEvent>> {
         let mut events = Vec::new();
         let mut waited = false;
@@ -253,8 +257,9 @@ impl Drop for RealTerminal {
     }
 }
 
-/// Redirected output: plain bytes, fixed size, no events. Nothing is emitted
-/// that a file or a pipe should not contain.
+/// Redirected output: plain bytes, fixed size, no events, no escape sequences.
+/// Nothing is emitted that a file or a pipe should not contain — which is also
+/// why a frame is a line here rather than a cursor dance.
 pub struct PlainTerminal<W> {
     out: W,
     size: (usize, usize),
@@ -264,6 +269,14 @@ impl<W: Write> PlainTerminal<W> {
     /// Plain output to `out`, sized by [`detect_size`].
     pub fn new(out: W, size: (usize, usize)) -> Self {
         Self { out, size }
+    }
+}
+
+#[cfg(test)]
+impl<W> PlainTerminal<W> {
+    /// The writer, back again — what a redirected run actually produced.
+    pub fn into_inner(self) -> W {
+        self.out
     }
 }
 
@@ -282,10 +295,15 @@ impl<W: Write> Terminal for PlainTerminal<W> {
         self.size
     }
 
-    #[allow(dead_code)] // consumed by the run loop (T-7)
-    fn poll(&mut self, _timeout: Duration) -> io::Result<Vec<TerminalEvent>> {
-        // No terminal, no events: the run loop simply draws every frame.
+    fn poll(&mut self, timeout: Duration) -> io::Result<Vec<TerminalEvent>> {
+        // No terminal, so no events — but the frame interval still has to run
+        // down, or a redirected run would draw as fast as it can write.
+        std::thread::sleep(timeout);
         Ok(Vec::new())
+    }
+
+    fn supports_escape(&self) -> bool {
+        false
     }
 }
 
@@ -296,6 +314,9 @@ impl<W: Write> Terminal for PlainTerminal<W> {
 pub struct FakeTerminal {
     size: (usize, usize),
     events: Vec<TerminalEvent>,
+    scheduled: Vec<(usize, TerminalEvent)>,
+    sizes: Vec<(usize, usize, usize)>,
+    polls: usize,
     written: Vec<u8>,
     frames: Vec<String>,
     flushes: usize,
@@ -309,6 +330,9 @@ impl FakeTerminal {
         Self {
             size: (columns, rows),
             events: Vec::new(),
+            scheduled: Vec::new(),
+            sizes: Vec::new(),
+            polls: 0,
             written: Vec::new(),
             frames: Vec::new(),
             flushes: 0,
@@ -324,6 +348,26 @@ impl FakeTerminal {
     /// Queues an event for the next [`Terminal::poll`].
     pub fn push_event(&mut self, event: TerminalEvent) {
         self.events.push(event);
+    }
+
+    /// Queues an event for the `poll`th call to [`Terminal::poll`], counted
+    /// from 1 — how a run loop is tested against something that happens in the
+    /// middle of a scroll: a window resized after three frames, a Ctrl+C after
+    /// ten.
+    pub fn push_event_at(&mut self, poll: usize, event: TerminalEvent) {
+        self.scheduled.push((poll, event));
+    }
+
+    /// Resizes the fake terminal on the `poll`th call to [`Terminal::poll`],
+    /// reporting it as a window resize would: the new size is what `size()`
+    /// answers from then on, and the event is delivered on the same poll.
+    pub fn push_resize_at(&mut self, poll: usize, columns: usize, rows: usize) {
+        self.sizes.push((poll, columns, rows));
+    }
+
+    /// How many times the run loop has polled.
+    pub fn poll_count(&self) -> usize {
+        self.polls
     }
 
     /// Everything written so far, as text.
@@ -365,7 +409,32 @@ impl Terminal for FakeTerminal {
     }
 
     fn poll(&mut self, _timeout: Duration) -> io::Result<Vec<TerminalEvent>> {
-        Ok(std::mem::take(&mut self.events))
+        self.polls += 1;
+        let poll = self.polls;
+        let mut events = std::mem::take(&mut self.events);
+
+        let mut later = Vec::new();
+        for (due, event) in self.scheduled.drain(..) {
+            if due == poll {
+                events.push(event);
+            } else {
+                later.push((due, event));
+            }
+        }
+        self.scheduled = later;
+
+        let mut sizes = Vec::new();
+        for (due, columns, rows) in self.sizes.drain(..) {
+            if due == poll {
+                self.size = (columns, rows);
+                events.push(TerminalEvent::Resize { columns, rows });
+            } else {
+                sizes.push((due, columns, rows));
+            }
+        }
+        self.sizes = sizes;
+
+        Ok(events)
     }
 }
 
