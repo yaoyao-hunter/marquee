@@ -1,6 +1,6 @@
-// The big-font modules are built ahead of their consumers (T-11 engine
-// strip, T-12 renderer), so nothing in the binary calls them yet; the
-// allow keeps the clippy gate green until then (see vault note N-3).
+// The big-font face and glyph types are consumed by the scroll engine (T-11);
+// the Rasterizer still waits for the T-12 renderer, so parts of the module
+// tree remain dead until then (see vault note N-3).
 #[allow(dead_code)]
 mod bigfont;
 mod cli;
